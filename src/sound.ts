@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { copyFileSync, existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { LAIN_DIR, loadConfig, saveConfig } from "./config.js"
+import { LAIN_DIR, LAIN_ROOT, loadConfig, saveConfig } from "./config.js"
 
 /** Cuánto dura, a lo sumo, cada reproducción de aviso antes de cerrar el reproductor. */
 const MAX_PLAY_MS = 2500
@@ -12,16 +12,28 @@ let aviso: ChildProcess | null = null
 /** Reproductor del tecleo (suena en bucle mientras lain escribe). */
 let tecleo: ChildProcess | null = null
 
-function ruta(cfg: string | undefined, porDefecto: string): string {
-  return cfg?.trim() || join(LAIN_DIR, porDefecto)
+/** Los sonidos que vienen con lain, para que suene sin configurar nada. */
+const SONIDOS = join(LAIN_ROOT, "assets", "sounds")
+
+/**
+ * De dónde sale un sonido, en orden de prioridad:
+ *   1. lo que digas en la config (`soundFile` / `typingFile`),
+ *   2. tu copia en `~/.lain`,
+ *   3. la que viene con lain, en `assets/sounds`.
+ */
+export function rutaDeSonido(nombre: string, dicho?: string): string {
+  const propio = dicho?.trim()
+  if (propio) return propio
+  const mio = join(LAIN_DIR, nombre)
+  return existsSync(mio) ? mio : join(SONIDOS, nombre)
 }
 
 function archivoAviso(): string {
-  return ruta(loadConfig().soundFile, "notification.mp3")
+  return rutaDeSonido("notification.mp3", loadConfig().soundFile)
 }
 
 function archivoTecleo(): string {
-  return ruta(loadConfig().typingFile, "typing.mp3")
+  return rutaDeSonido("typing.mp3", loadConfig().typingFile)
 }
 
 /** Copia a ~/.lain el mp3 que esté en Descargas, para no depender de esa carpeta. */

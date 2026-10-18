@@ -1,7 +1,7 @@
 // Prueba de humo: no habla con el modelo ni toca tu ~/.lain real.
 // Se aísla en una carpeta temporal (LAIN_HOME) y levanta el relay en un puerto
 // libre, así que se puede correr en cualquier máquina sin ensuciar nada.
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -16,6 +16,7 @@ const { ensureVault, writeExchange, writeRemoteEntries, vaultStats, readLocalInd
   "../src/vault.js"
 )
 const { slugify, tagsFrom, titleFrom } = await import("../src/wired/protocol.js")
+const { rutaDeSonido } = await import("../src/sound.js")
 
 let fallos = 0
 const check = (cond: boolean, msg: string): void => {
@@ -67,6 +68,20 @@ try {
   check(slug.length > 0 && !slug.includes(" "), "slugify arma un slug sin espacios")
   check(tagsFrom("un mapa en obsidian con wikilinks").length >= 1, "tagsFrom detecta etiquetas")
   check(titleFrom("una pregunta muy larga que se debe recortar elegantemente en algun punto").endsWith("…"), "titleFrom recorta con elipsis")
+
+  // Sonidos: los que vienen con lain, y quién manda sobre quién.
+  const aviso = rutaDeSonido("notification.mp3")
+  const tecleo = rutaDeSonido("typing.mp3")
+  check(existsSync(aviso) && statSync(aviso).size > 0, "el sonido de aviso viene con lain")
+  check(existsSync(tecleo) && statSync(tecleo).size > 0, "el sonido de tecleo viene con lain")
+  check(aviso.includes(join("assets", "sounds")), "sin copia propia, usa el de assets/sounds")
+
+  writeFileSync(join(home, "notification.mp3"), "x")
+  check(rutaDeSonido("notification.mp3") === join(home, "notification.mp3"), "tu copia en LAIN_HOME manda sobre la de lain")
+  check(
+    rutaDeSonido("notification.mp3", "C:\\mis-sonidos\\blip.mp3") === "C:\\mis-sonidos\\blip.mp3",
+    "y la config manda sobre todo",
+  )
 
   await relay.close()
 } catch (err) {

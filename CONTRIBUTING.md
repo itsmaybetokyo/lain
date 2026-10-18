@@ -61,7 +61,7 @@ npm run preview:tui    # un fotograma completo de la pantalla
 | `src/update.ts` | chequeo de commits nuevos y `git pull` con dependencias |
 | `src/install.ts` | el comando `lain` en el PATH (lanzador + PATH del usuario) |
 | `src/vault.ts` | las notas de Obsidian y el índice local |
-| `src/tts.ts`, `src/sound.ts` | voz enchufable y sonidos |
+| `src/tts.ts`, `src/sound.ts` | voz enchufable y sonidos (los mp3 por defecto viven en `assets/sounds/`) |
 | `src/local.ts` | el faro local (ciudad, hora, titulares) |
 | `src/mux.ts` | integración con psmux/tmux |
 | `src/limit.ts` | la cuota gratuita de opencode |

@@ -17,7 +17,10 @@ mirar. Y ese grafo no queda solo: los nodos se federan en **la Wired** (Protocol
   `/sync` baja lo de otros, `/search` busca en todo, y `/entropia` dice cuánto se piensa
   la Wired a sí misma.
 - **La voz** es opcional y enchufable: `TTS` queda en silencio salvo que le des un motor
-  con `/voice`. Los sonidos de aviso y de tecleo se apagan con `/sound` y `/typing`.
+  con `/voice`. El aviso y el tecleo sí suenan de entrada —vienen dos mp3 con lain, en
+  `assets/sounds/`— y se apagan con `/sound` y `/typing`. Para usar los tuyos, dejá
+  `notification.mp3` y `typing.mp3` en `~/.lain/` (mandan sobre los de lain) o apuntá
+  `soundFile` y `typingFile` en la config a donde quieras.
 
 ## Estado
 
