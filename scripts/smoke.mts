@@ -4,6 +4,7 @@
 import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { WireEntry } from "../src/wired/protocol.js"
 
 const home = mkdtempSync(join(tmpdir(), "lain-smoke-"))
 process.env.LAIN_HOME = home
@@ -82,6 +83,74 @@ try {
     rutaDeSonido("notification.mp3", "C:\\mis-sonidos\\blip.mp3") === "C:\\mis-sonidos\\blip.mp3",
     "y la config manda sobre todo",
   )
+
+  // Lo que la Wired ya te contó al abrir: no se repite en el próximo arranque.
+  const visto = await import("../src/wired/visto.js")
+  const entrada = (id: string, created: string, title = id): WireEntry => ({
+    id,
+    nodeId: "n1",
+    handle: "alice",
+    title,
+    tags: ["obsidian"],
+    summary: "",
+    content: "",
+    created,
+    hash: "h" + id,
+  })
+  const historial = [
+    entrada("a", "2026-01-01T10:00:00Z", "la vieja"),
+    entrada("b", "2026-03-01T10:00:00Z", "la del medio"),
+    entrada("c", "2026-05-01T10:00:00Z", "la nueva"),
+  ]
+
+  check(visto.cargaVistos().size === 0, "sin archivo, no hay nada visto")
+  const primerizas = visto.nuevosDe(historial, visto.cargaVistos())
+  check(primerizas.length === 3, "la primera vez, todas las notas son nuevas")
+  check(primerizas[0]!.title === "la nueva", "y vienen de la más nueva a la más vieja")
+
+  visto.guardaVistos(historial.map((e) => e.id))
+  check(visto.cargaVistos().size === 3, "guardaVistos deja el archivo")
+  check(visto.nuevosDe(historial, visto.cargaVistos()).length === 0, "y ya no hay novedades que contar")
+
+  const conUnaMas = [...historial, entrada("d", "2026-06-01T10:00:00Z", "recién publicada")]
+  const soloNuevas = visto.nuevosDe(conUnaMas, visto.cargaVistos())
+  check(soloNuevas.length === 1 && soloNuevas[0]!.title === "recién publicada", "al abrir, solo te cuenta lo que no viste")
+
+  visto.anotaVisto("d")
+  check(visto.nuevosDe(conUnaMas, visto.cargaVistos()).length === 0, "anotaVisto suma sin perder lo anterior")
+
+  writeFileSync(join(home, "wired-visto.json"), "{roto")
+  check(visto.cargaVistos().size === 0, "si el archivo está roto, arranca vacío en vez de romper")
+
+  // Los avisos no ensanchan el panel izquierdo: se recortan al ancho del retrato.
+  const { mascot } = await import("../src/mascot.js")
+  const { avisoLines, avisoLinesOne } = await import("../src/avisos.js")
+  const { stripAnsi } = await import("../src/theme.js")
+
+  const anchoDe = (ls: string[]): number => ls.reduce((m, l) => Math.max(m, stripAnsi(l).length), 0)
+  const anchoArte = (mode: "smooth" | "half" | "full"): number => {
+    const ls = mascot({ mode }).split("\n")
+    ls.pop() // afuera el pie del retrato, igual que artLines()
+    return anchoDe(ls)
+  }
+  const larga = {
+    titulo: "cual es la cotizacion del dolar en ars ahora mismo?",
+    detalle: "#wired #lain #hola",
+    quien: ["ttttt"],
+    cuando: Date.now(),
+    bajado: true,
+  }
+
+  check(anchoDe(avisoLinesOne(larga)) > anchoArte("half"), "sin límite, un título largo ensancharía el panel")
+
+  for (const mode of ["smooth", "half", "full"] as const) {
+    const w = anchoArte(mode)
+    const uno = avisoLinesOne(larga, w)
+    check(anchoDe(uno) <= w, `el aviso nunca pasa del retrato (${mode})`)
+    check(stripAnsi(uno[0]!).endsWith("…"), `y el título sobrante se corta con … (${mode})`)
+    const pila = avisoLines([larga, { ...larga, titulo: "otra nota larga distinta para medir el ancho" }], 99, Date.now(), w)
+    check(anchoDe(pila) <= w, `la pila entera respeta el ancho del retrato (${mode})`)
+  }
 
   await relay.close()
 } catch (err) {

@@ -7,7 +7,7 @@ import { installLauncher, uninstallLauncher } from "./install.js"
 import { Brain } from "./brain.js"
 import { mascot, type ArtMode } from "./mascot.js"
 import { C, paint, sleep, S } from "./theme.js"
-import { Tui, type Role } from "./tui.js"
+import { Tui, visLen, type Role } from "./tui.js"
 import {
   ensureVault,
   writeExchange,
@@ -21,6 +21,7 @@ import * as wired from "./wired/backend.js"
 import type { Snapshot } from "./wired/backend.js"
 import type { WireEntry } from "./wired/protocol.js"
 import { entropyOf, type Entropy } from "./wired/entropy.js"
+import { anotaVisto, cargaVistos, guardaVistos, nuevosDe } from "./wired/visto.js"
 import { barraAbajo as barraDeAbajo, type WiredBar } from "./bar.js"
 import * as mux from "./mux.js"
 import * as local from "./local.js"
@@ -139,7 +140,7 @@ function statusRight(cfg: LainConfig, brain?: Brain): string {
 const ART_CYCLE: ArtMode[] = ["smooth", "half", "full"]
 
 function artMode(cfg: LainConfig): ArtMode {
-  return cfg.art && ART_CYCLE.includes(cfg.art) ? cfg.art : "smooth"
+  return cfg.art && ART_CYCLE.includes(cfg.art) ? cfg.art : "half"
 }
 
 /** Estado global de la Wired: entropía cacheada (para la barra y para lain). */
@@ -186,8 +187,23 @@ function arrancaAnimAvisos(tui: Tui, cfg: LainConfig): void {
   }, 40)
 }
 
-function leftPanel(cfg: LainConfig, avisoMax = Infinity): string[] {
-  return [...artLines(cfg), ...avisoLines(avisos, avisoMax)]
+/**
+ * Ancho del retrato. Es el techo del panel izquierdo: los avisos se recortan a
+ * esta medida, así que nunca lo ensanchan ni corren el chat de al lado.
+ */
+function anchoRetrato(cfg: LainConfig): number {
+  return artLines(cfg).reduce((max, l) => Math.max(max, visLen(l)), 0)
+}
+
+function leftPanel(cfg: LainConfig, avisoMax = Infinity, ancho = anchoRetrato(cfg)): string[] {
+  return [...artLines(cfg), ...avisoLines(avisos, avisoMax, Date.now(), ancho)]
+}
+
+/** Apila una notificación sin sonido ni animación (para el resumen de apertura). */
+function apilaAviso(a: Aviso): void {
+  // La más nueva se apila arriba; si se pasa del tope, cae la más vieja.
+  avisos.unshift({ ...a })
+  while (avisos.length > AVISOS_MAX) avisos.pop()
 }
 
 /**
@@ -199,9 +215,13 @@ function avisoWired(
   cfg: LainConfig,
   a: { titulo: string; detalle?: string; quien?: string[]; cuando?: number; bajado?: boolean },
 ): void {
-  // La más nueva se apila arriba; si se pasa del tope, cae la más vieja.
-  avisos.unshift({ titulo: a.titulo, detalle: a.detalle ?? "", quien: a.quien ?? [], cuando: a.cuando ?? Date.now(), bajado: !!a.bajado })
-  while (avisos.length > AVISOS_MAX) avisos.pop()
+  apilaAviso({
+    titulo: a.titulo,
+    detalle: a.detalle ?? "",
+    quien: a.quien ?? [],
+    cuando: a.cuando ?? Date.now(),
+    bajado: !!a.bajado,
+  })
   sound.playSound() // cada aviso suena (si no está apagado con /sound)
   if (tui && tui.tty) {
     animarAviso()
@@ -227,16 +247,17 @@ async function leeWired(cfg: LainConfig): Promise<void> {
 }
 
 /** Fotogramas del retrato (con las notificaciones apiladas abajo) para animarlo. */
-function leftFrames(cfg: LainConfig, avisoMax = Infinity): string[][] {
+function leftFrames(cfg: LainConfig, avisoMax = Infinity, ancho = anchoRetrato(cfg)): string[][] {
   const glitches = [0, 5, 1, 9, 2, 0, 6, 3]
-  return glitches.map((g) => [...artLines(cfg, g), ...avisoLines(avisos, avisoMax)])
+  return glitches.map((g) => [...artLines(cfg, g), ...avisoLines(avisos, avisoMax, Date.now(), ancho)])
 }
 
 function refreshLeft(tui: Tui, cfg: LainConfig): void {
   // Cuántas filas quedan bajo el retrato en esta terminal: el apilado se ajusta solo.
   const avisoMax = Math.max(0, tui.leftBudget() - artLines(cfg).length)
-  tui.setLeft(leftPanel(cfg, avisoMax))
-  tui.setLeftAnimation(leftFrames(cfg, avisoMax))
+  const ancho = anchoRetrato(cfg)
+  tui.setLeft(leftPanel(cfg, avisoMax, ancho))
+  tui.setLeftAnimation(leftFrames(cfg, avisoMax, ancho))
   tui.refresh()
 }
 
@@ -340,6 +361,45 @@ async function bajaDeLaWired(cfg: LainConfig): Promise<boolean> {
   }
 }
 
+/**
+ * Al abrir, te cuenta lo último de la Wired: las notas más nuevas que todavía no
+ * te anunciamos, tuyas o de otros. Entran asentadas —sin sonido ni animación— y
+ * solo las que caben en el panel; lo que viste queda anotado en ~/.lain para no
+ * repetírtelo cada vez.
+ */
+async function pendientesDeLaWired(tui: Tui, cfg: LainConfig): Promise<void> {
+  try {
+    const todas = await wired.allEntries(cfg)
+    const nuevas = nuevosDe(todas, cargaVistos())
+    guardaVistos(todas.map((e) => e.id)) // aunque alguna no entre, ya la viste
+    if (!nuevas.length) return
+
+    // Cada aviso ocupa 3 filas y una más de aire: entran los que dé el panel.
+    const libre = Math.max(0, tui.leftBudget() - artLines(cfg).length)
+    const cupo = Math.max(1, Math.min(AVISOS_MAX, Math.floor((libre + 1) / 4)))
+    const bajaron = await bajaDeLaWired(cfg) // lo de otros queda en tu vault
+
+    for (const e of nuevas.slice(0, cupo).reverse()) {
+      const t = Date.parse(e.created)
+      apilaAviso({
+        titulo: e.title,
+        detalle: e.tags.length ? e.tags.slice(0, 3).map((x) => `#${x}`).join(" ") : "nota nueva",
+        quien: [e.handle],
+        cuando: Number.isFinite(t) ? t : Date.now(),
+        // Lo tuyo ya está en tu vault; lo de otros, solo si esta pasada lo bajó.
+        bajado: e.nodeId === cfg.nodeId || bajaron,
+      })
+    }
+    quietarAnim()
+    refreshLeft(tui, cfg)
+
+    const sobran = nuevas.length - cupo
+    if (sobran > 0) tui.push("system", `y ${sobran} nota(s) más de la Wired, más viejas que esas`)
+  } catch {
+    /* sin red o sin repo: no molestamos al abrir */
+  }
+}
+
 /** Rehace el estado (modelo arriba; wired, tokens y entropía abajo) y repinta. */
 async function repintaEstado(tui: Tui, cfg: LainConfig): Promise<void> {
   await leeWired(cfg)
@@ -361,6 +421,7 @@ function publicaEnWired(tui: Tui, cfg: LainConfig, entry: WireEntry): void {
       const r = await wired.publish(cfg, [entry])
       if (r.added > 0) {
         tui.push("system", `publicado en ${wired.label(cfg)} (+${r.added})`)
+        anotaVisto(entry.id) // ya te lo contamos acá: que no reaparezca al abrir
         // Aviso bajo el retrato: tu propio movimiento en la Wired también avisa.
         avisoWired(tui, cfg, {
           titulo: "lo tuyo ya está en la Wired",
@@ -544,6 +605,8 @@ async function repl(cfg: LainConfig): Promise<void> {
   await brain.prime(LAIN_SYSTEM + workDirContext(workDir) + entropyContext())
   // Sin esperarlo: si hay commits nuevos, avisa cuando pueda.
   chequeaVersionDeFondo(tui)
+  // Y sin esperarlo tampoco: lo que pasó en la Wired mientras no estabas.
+  void pendientesDeLaWired(tui, cfg)
 
   tui.setStatus(statusLeft(cfg), statusRight(cfg, brain))
   tui.setStats(barraAbajo(brain))

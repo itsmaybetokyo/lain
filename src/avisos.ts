@@ -1,4 +1,4 @@
-import { C, paint, sliceVisible, stripAnsi } from "./theme.js"
+import { C, paint, sliceVisible, stripAnsi, truncateVisible } from "./theme.js"
 
 /** Una notificación de la Wired apilada bajo el retrato. */
 export interface Aviso {
@@ -44,8 +44,12 @@ const hhmm = (ts: number): string => {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
 }
 
-/** Una notificación bajo el retrato, al estilo de lain (hasta 3 líneas). */
-export function avisoLinesOne(a: Aviso): string[] {
+/**
+ * Una notificación bajo el retrato, al estilo de lain (hasta 3 líneas).
+ * Nunca pasa de `maxCols`: el aviso vive dentro del ancho del retrato, así que
+ * un título largo se corta con "…" en vez de ensanchar el panel izquierdo.
+ */
+export function avisoLinesOne(a: Aviso, maxCols = Infinity): string[] {
   const out = [
     "  " + paint(C.brmagenta, "▓▒░") + " " + paint(C.bold + C.brcyan, "the wired") + " " + paint(C.gray, `:: ${a.titulo}`),
   ]
@@ -58,7 +62,7 @@ export function avisoLinesOne(a: Aviso): string[] {
   if (detalle) out.push("    " + paint(C.brcyan, detalle))
   const pie = [hhmm(a.cuando), a.bajado ? "ya en tu vault" : ""].filter(Boolean).join(" · ")
   if (pie) out.push("    " + paint(C.dim, pie))
-  return out
+  return out.map((l) => truncateVisible(l, maxCols))
 }
 
 /** Deja ver solo los primeros `n` caracteres del bloque, línea por línea. */
@@ -83,8 +87,8 @@ function revela(ls: string[], n: number, cursor: boolean): string[] {
 }
 
 /** El aviso más nuevo: barra a la izquierda y texto que se escribe solo. */
-function avisoNuevo(a: Aviso, fase: number, animando: boolean, ahora: number): string[] {
-  const ls = avisoLinesOne(a)
+function avisoNuevo(a: Aviso, fase: number, animando: boolean, ahora: number, maxCols = Infinity): string[] {
+  const ls = avisoLinesOne(a, maxCols)
   const cuerpo = [ls[0]!.slice(2), ...ls.slice(1)] // sin la sangría: la pone la barra
   const marca = paint(animando && pulso(ahora) ? C.brcyan : C.brmagenta, "▌")
   if (!animando) return [marca + " " + cuerpo[0]!, ...cuerpo.slice(1)]
@@ -94,17 +98,18 @@ function avisoNuevo(a: Aviso, fase: number, animando: boolean, ahora: number): s
 }
 
 /**
- * Notificaciones apiladas (la más nueva arriba) que entran en `maxRows` filas.
- * Solo se muestran avisos enteros: así no queda uno cortado a la mitad.
- * El más nuevo se escribe carácter por carácter; los viejos ya están quietos.
+ * Notificaciones apiladas (la más nueva arriba) que entran en `maxRows` filas y
+ * `maxCols` columnas. Solo se muestran avisos enteros: así no queda uno cortado
+ * a la mitad. El más nuevo se escribe carácter por carácter; los viejos ya están
+ * quietos. `maxCols` es el ancho del retrato: los avisos nunca lo ensanchan.
  */
-export function avisoLines(lista: Aviso[], maxRows = Infinity, ahora = Date.now()): string[] {
+export function avisoLines(lista: Aviso[], maxRows = Infinity, ahora = Date.now(), maxCols = Infinity): string[] {
   const fase = avisoPhase(ahora)
   const animando = fase < 1
   const out: string[] = []
   for (let idx = 0; idx < lista.length; idx++) {
     const a = lista[idx]!
-    const ls = idx === 0 ? avisoNuevo(a, fase, animando, ahora) : avisoLinesOne(a)
+    const ls = idx === 0 ? avisoNuevo(a, fase, animando, ahora, maxCols) : avisoLinesOne(a, maxCols)
     const sep = out.length ? 1 : 0 // blanco entre avisos (no antes del primero)
     if (out.length + sep + ls.length > maxRows) break
     if (sep) out.push("")

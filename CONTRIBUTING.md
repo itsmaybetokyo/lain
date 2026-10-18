@@ -71,6 +71,7 @@ npm run preview:tui    # un fotograma completo de la pantalla
 | `src/wired/server.ts` | el relay local (`npm run wired`) |
 | `src/wired/client.ts` | el cliente HTTP del relay |
 | `src/wired/entropy.ts` | la entropía global |
+| `src/wired/visto.ts` | qué notas de la Wired ya te anunciamos al abrir |
 
 ## Estilo
 

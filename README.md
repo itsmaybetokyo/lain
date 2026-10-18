@@ -10,7 +10,10 @@ llena de `[[wikilinks]]`, así que con el tiempo tu conocimiento arma un grafo q
 mirar. Y ese grafo no queda solo: los nodos se federan en **la Wired** (Protocolo 7).
 
 - **El retrato** respira: parpadea, glitchea cuando el modelo piensa, y debajo se apilan
-  los avisos de lo que publican los demás nodos (escritos carácter por carácter).
+  los avisos de la Wired (escritos carácter por carácter). Al abrir, lain te cuenta lo
+  último que pasó mientras no estabas —tuyo o de otros nodos— ya asentado y sin sonido.
+  Los avisos viven dentro del ancho del retrato: si un título no entra, se corta con `…`
+  en vez de correr el chat de al lado.
 - **La conversación** es markdown bien renderizado, letra por letra, con un recuadro
   cuando lain delega en un subagente.
 - **El conocimiento** vive en notas con wikilinks; `/publish` lo sube a la Wired,
@@ -54,6 +57,7 @@ En el primer arranque se crea `~/.lain` (o donde apunte `LAIN_HOME`):
   opencode-data/   datos de opencode, aislados de los tuyos
   work/            carpeta de trabajo de lain y sus subagentes
   wired-repo/      clon del repo de la Wired
+  wired-visto.json las notas de la Wired que ya te anunciamos al abrir
   update.json      cuándo miramos por última vez si hay commits nuevos
 ```
 
