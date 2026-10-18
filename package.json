@@ -1,0 +1,49 @@
+{
+  "name": "lain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "lain :: a CLI familiar. Habla con opencode, guarda tu nodo en Obsidian y conecta con la Wired.",
+  "license": "MIT",
+  "author": "itsmaybetokyo",
+  "homepage": "https://github.com/itsmaybetokyo/lain#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itsmaybetokyo/lain.git"
+  },
+  "bugs": {
+    "url": "https://github.com/itsmaybetokyo/lain/issues"
+  },
+  "keywords": [
+    "cli",
+    "opencode",
+    "obsidian",
+    "ascii-art",
+    "braille",
+    "knowledge-base",
+    "wired"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "lain": "./bin/lain.mjs"
+  },
+  "scripts": {
+    "lain": "tsx src/index.ts",
+    "wired": "tsx src/index.ts wired",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke.mts",
+    "test": "npm run typecheck && npm run smoke",
+    "preview:art": "tsx scripts/preview-art.mts",
+    "preview:tui": "tsx scripts/preview-tui.mts"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.19.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

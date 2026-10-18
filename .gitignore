@@ -1,0 +1,29 @@
+# dependencias
+node_modules/
+
+# compilados y cachés
+dist/
+build/
+*.tsbuildinfo
+.cache/
+
+# secretos y entorno
+.env
+.env.*
+!.env.example
+
+# datos locales. lain guarda todo en ~/.lain, pero si alguien apunta la config
+# acá (LAIN_HOME=./.lain) que no termine en el repo.
+.lain/
+*.local.json
+*.local
+
+# sistema y editores
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
