@@ -111,6 +111,9 @@ export function fallaDeClon(cfg: LainConfig): string | null {
 function conectarHistorias(dir: string): void {
   // Un clon bueno deja upstream configurado: eso es una Wired normal y no se toca.
   if (git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], dir).ok) return
+  // El rebase arma commits nuevos, así que necesita firma: sin identidad git se
+  // niega y el rescate quedaría a medias (pasa en máquinas sin user.name).
+  const id = identidad(dir)
   const rama = git(["symbolic-ref", "--short", "HEAD"], dir).out || "main"
   const traido = git(["fetch", "origin", rama], dir)
   if (!traido.ok) {
@@ -130,7 +133,7 @@ function conectarHistorias(dir: string): void {
     sinWired.delete(dir)
     return
   }
-  if (git(["rebase", "FETCH_HEAD"], dir).ok) {
+  if (git([...id, "rebase", "FETCH_HEAD"], dir).ok) {
     git(["branch", `--set-upstream-to=origin/${rama}`], dir)
     sinWired.delete(dir)
   } else {
@@ -171,18 +174,23 @@ export function ensureRepo(cfg: LainConfig): string {
   return dir
 }
 
-function commit(dir: string, args: string[]): void {
+/**
+ * Con qué firma lain los commits que arma solo (notas, rebase de rescate, pull).
+ * Si el repo ya tiene identidad se respeta y no se agrega nada; esto es solo
+ * para que no falle en máquinas sin `user.name` configurado.
+ */
+function identidad(dir: string): string[] {
   const name = git(["config", "user.name"], dir)
   const mail = git(["config", "user.email"], dir)
-  const id = name.ok && name.out && mail.ok && mail.out ? [] : ["-c", "user.name=lain", "-c", "user.email=lain@wired.local"]
-  git([...id, "commit", ...args], dir)
+  return name.ok && name.out && mail.ok && mail.out ? [] : ["-c", "user.name=lain", "-c", "user.email=lain@wired.local"]
+}
+
+function commit(dir: string, args: string[]): void {
+  git([...identidad(dir), "commit", ...args], dir)
 }
 
 async function commitAsync(dir: string, args: string[]): Promise<void> {
-  const name = await gitAsync(["config", "user.name"], dir)
-  const mail = await gitAsync(["config", "user.email"], dir)
-  const id = name.ok && name.out && mail.ok && mail.out ? [] : ["-c", "user.name=lain", "-c", "user.email=lain@wired.local"]
-  await gitAsync([...id, "commit", ...args], dir)
+  await gitAsync([...identidad(dir), "commit", ...args], dir)
 }
 
 /**
@@ -321,7 +329,7 @@ export function flushGit(cfg: LainConfig): FlushResult {
   if (pendingGit(cfg) === 0) return { pushed: true, pending: 0, note: "", falla: "" }
   const upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], dir)
   let note = ""
-  if (upstream.ok && !git(["pull", "--rebase", "--autostash"], dir).ok) {
+  if (upstream.ok && !git([...identidad(dir), "pull", "--rebase", "--autostash"], dir).ok) {
     note = "no pude hacer pull (¿conflicto?)"
   }
   const push = git(["push", "-u", "origin", "HEAD"], dir)
@@ -343,7 +351,7 @@ async function flushGitRaw(cfg: LainConfig): Promise<FlushResult> {
   if ((await pendingGitAsync(cfg)) === 0) return { pushed: true, pending: 0, note: "", falla: "" }
   const upstream = await gitAsync(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], dir)
   let note = ""
-  if (upstream.ok && !(await gitAsync(["pull", "--rebase", "--autostash"], dir)).ok) {
+  if (upstream.ok && !(await gitAsync([...identidad(dir), "pull", "--rebase", "--autostash"], dir)).ok) {
     note = "no pude hacer pull (¿conflicto?)"
   }
   const push = await gitAsync(["push", "-u", "origin", "HEAD"], dir)
