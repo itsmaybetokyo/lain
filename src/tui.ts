@@ -697,8 +697,6 @@ export class Tui {
     }
     // El modelo entrega tokens; acá se sueltan de a poco para el efecto "letra por letra".
     this.typeQueue += chunk
-    this.setTyping(true)
-    this.armaIdle()
     if (!this.typeTimer) this.typeTimer = setInterval(() => this.drainType(), TYPE_TICK_MS)
   }
 
@@ -713,6 +711,10 @@ export class Tui {
     const take = this.typeQueue.slice(0, k)
     this.typeQueue = this.typeQueue.slice(k)
     this.busy = sinGuionesLargos(this.busy + take)
+    // El sonido de tecleo acompaña lo que se ve escribir, no lo que llega del
+    // modelo: si no, se apaga mientras la respuesta se sigue escribiendo.
+    this.setTyping(true)
+    this.armaIdle()
     this.refresh()
   }
 

@@ -241,6 +241,50 @@ try {
     "el texto sale letra por letra (a lo sumo 3 por tick)",
   )
 
+  // El sonido de tecleo sigue a lo que se escribe, no a lo que llega del modelo:
+  // si el modelo entrega todo junto y la escritura sigue, no se puede apagar.
+  {
+    const { Tui } = await import("../src/tui.js")
+    const out = process.stdout as any
+    const inn = process.stdin as any
+    const antes = {
+      outTty: out.isTTY,
+      cols: out.columns,
+      rows: out.rows,
+      inTty: inn.isTTY,
+      raw: inn.setRawMode,
+      write: out.write,
+    }
+    out.isTTY = true
+    out.columns = 100
+    out.rows = 30
+    inn.isTTY = true
+    inn.setRawMode = () => {}
+    out.write = () => true // el TUI pinta en la pantalla alternativa: acá no interesa
+
+    const tui = new Tui({ userName: "smoke" })
+    const ev: boolean[] = []
+    tui.onTyping = (on) => ev.push(on)
+    tui.start()
+    tui.beginStream("escribiendo…")
+    tui.streamChunk("x".repeat(40))
+    const apenas = ev.length
+    await new Promise((r) => setTimeout(r, 260))
+    const escribiendo = ev[0] === true && !ev.includes(false)
+    tui.flushTyping()
+    tui.stop()
+
+    out.write = antes.write
+    out.isTTY = antes.outTty
+    out.columns = antes.cols
+    out.rows = antes.rows
+    inn.isTTY = antes.inTty
+    inn.setRawMode = antes.raw
+
+    check(apenas === 0, "el sonido no arranca solo porque llegue texto del modelo")
+    check(escribiendo, "arranca cuando lain empieza a escribir y no se corta mientras escribe")
+  }
+
   const conCausa = (code: string) => Object.assign(new TypeError("fetch failed"), { cause: { code } })
   const colgado = explainError(conCausa("UND_ERR_HEADERS_TIMEOUT"))
   check(/servidor de opencode/.test(colgado) && !/no hay red/.test(colgado), "un turno que se cuelga no se cuenta como falta de red")
