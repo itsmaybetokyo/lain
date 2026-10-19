@@ -57,7 +57,7 @@ En el primer arranque se crea `~/.lain` (o donde apunte `LAIN_HOME`):
   opencode-data/   datos de opencode, aislados de los tuyos
   work/            carpeta de trabajo de lain y sus subagentes
   wired-repo/      clon del repo de la Wired
-  wired-visto.json las notas de la Wired que ya te anunciamos al abrir
+  wired-visto.json las notas de la Wired que ya viste (para marcar las nuevas)
   update.json      cuándo miramos por última vez si hay commits nuevos
 ```
 
@@ -76,6 +76,7 @@ Dentro del REPL:
 | `/vault` | abrís tu vault de Obsidian |
 | `/whoami` | tu identidad de nodo y qué estás almacenando |
 | `/publish [--last N]` | subís tu conocimiento a la Wired (todo o los últimos N) |
+| `/acceso` | si no tenés permiso para publicar: te arma el pedido de llaves y lo abre en el navegador |
 | `/search <q>` | buscás en el conocimiento global |
 | `/sync` | bajás el conocimiento de otros nodos a tu vault (`WIRED/nodes`) |
 | `/local [ciudad]` | la hora y un par de titulares de tu ciudad |
@@ -85,6 +86,7 @@ Dentro del REPL:
 | `/install` · `/uninstall` | deja (o saca) el comando «lain» en tu PATH |
 | `/work [ruta]` | dónde crean archivos lain y sus subagentes |
 | `/mouse` | cedés (o devolvés) la rueda del mouse al multiplexor |
+| `/barra` | qué significa cada número de la barra de abajo |
 | `/voice <cmd>` · `/mute` · `/unmute` | motor de voz, silenciar, encender |
 | `/sound` · `/typing` | sonido de aviso y de tecleo |
 | `ctrl+x` | frenás la respuesta en curso |
@@ -149,7 +151,9 @@ https://github.com/itsmaybetokyo/wired
 ```
 
 Leer alcanza con que el repo sea público; **publicar** requiere ser colaborador del repo.
-Si querés tu propia federación, apuntá lain a donde quieras:
+El de arriba hoy es **privado**, así que solo lo leen sus colaboradores. Si no sos uno,
+lain igual te sirve (tus notas quedan guardadas y te dice qué pasó: ver «si no tenés la
+llave»). Si querés tu propia federación, apuntá lain a donde quieras:
 
 ```
 /wired git https://github.com/tu-usuario/tu-wired
@@ -167,8 +171,26 @@ npm run wired              # relay en http://127.0.0.1:7777
 ```
 
 Qué se publica lo decide la política `publish` del `config.json`
-(`private` / `public` / `all`) y, cuando querés, `/publish`. Ojo: el repo de la Wired es
-público, así que lo que subas —tu handle y el texto de las notas— queda a la vista de todos.
+(`private` / `public` / `all`) y, cuando querés, `/publish`. Ojo: lo que sube queda
+grabado en el repo de la Wired, así que si ese repo es público, tu handle y el texto de
+tus notas quedan a la vista de todos.
+
+### Si no tenés la llave
+
+Publicar necesita permiso de escritura, y eso no lo puede dar lain: lo da el dueño del
+repo. Cuando el push falla por eso, lain lo dice tal cual (no un «sin conexión» genérico)
+y te ofrece `/acceso`: arma el pedido —tu handle, tu nodeId y a qué Wired apuntás— y lo
+abre en el navegador con el issue ya escrito, para que lo mandes vos. Va al repo público
+de lain, no al de la Wired: un repo privado no deja abrir issues a quien no lo ve, y de
+lain te bajaste el programa, así que ese sí lo alcanzás. De ahí en más el dueño se entera
+por GitHub, y mientras tanto nada se pierde: tus notas quedan commiteadas en el clon
+local y lain reintenta sola cada minuto. El repo donde se pide se cambia con `accessRepo`
+en `config.json`.
+
+Y cuando por fin te suman, no perdés lo que hiciste mientras tanto: al próximo arranque
+lain detecta que tu copia quedó suelta y engancha la historia, así que tus notas entran en
+la Wired de verdad (encima de lo que ya había) en lugar de quedarse para siempre en una
+Wired paralela.
 
 ## Carpeta de trabajo
 

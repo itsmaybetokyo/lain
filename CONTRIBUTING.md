@@ -68,10 +68,11 @@ npm run preview:tui    # un fotograma completo de la pantalla
 | `src/wired/protocol.ts` | Protocolo 7: la unidad de conocimiento que viaja |
 | `src/wired/backend.ts` | elige el transporte (git o relay) |
 | `src/wired/git.ts` | la federación por repo git |
+| `src/wired/acceso.ts` | pedir las llaves cuando no podés publicar en la Wired |
 | `src/wired/server.ts` | el relay local (`npm run wired`) |
 | `src/wired/client.ts` | el cliente HTTP del relay |
 | `src/wired/entropy.ts` | la entropía global |
-| `src/wired/visto.ts` | qué notas de la Wired ya te anunciamos al abrir |
+| `src/wired/visto.ts` | qué notas de la Wired ya viste (para marcar las nuevas) |
 
 ## Estilo
 

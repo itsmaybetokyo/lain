@@ -11,6 +11,11 @@ const MAX_PLAY_MS = 2500
 let aviso: ChildProcess | null = null
 /** Reproductor del tecleo (suena en bucle mientras lain escribe). */
 let tecleo: ChildProcess | null = null
+/** Cuándo arrancó el reproductor actual (para no matarlo antes de que suene). */
+let tecleoDesde = 0
+let tecleoStop: ReturnType<typeof setTimeout> | null = null
+/** PowerShell tarda en abrir el mp3; matarlo antes de esto deja el turno mudo. */
+const MIN_TECLEO_MS = 900
 
 /** Los sonidos que vienen con lain, para que suene sin configurar nada. */
 const SONIDOS = join(LAIN_ROOT, "assets", "sounds")
@@ -75,7 +80,7 @@ export function setTypingSound(on: boolean): void {
   const cfg = loadConfig()
   cfg.soundTyping = on
   saveConfig(cfg)
-  if (!on) stopTyping()
+  if (!on) mataTecleo()
 }
 
 function lanzaPowershell(ps: string): ChildProcess | null {
@@ -128,6 +133,11 @@ export function stopSound(): void {
  */
 export function startTyping(): void {
   if (!isTypingSoundOn()) return
+  // Si había un corte esperando, se cancela: seguimos con el mismo reproductor.
+  if (tecleoStop) {
+    clearTimeout(tecleoStop)
+    tecleoStop = null
+  }
   if (tecleo) return
   const file = archivoTecleo()
   if (!existsSync(file)) return
@@ -143,6 +153,7 @@ export function startTyping(): void {
     "while($true){ Start-Sleep -Milliseconds ([int]($d*1000)); $p.Position=[TimeSpan]::Zero; $p.Play() }"
   tecleo = lanzaPowershell(ps)
   if (!tecleo) return
+  tecleoDesde = Date.now()
   const limpia = (): void => {
     tecleo = null
   }
@@ -150,7 +161,31 @@ export function startTyping(): void {
   tecleo.on("error", limpia)
 }
 
+/**
+ * Corta el tecleo. Si el reproductor acaba de arrancar se espera lo mínimo para
+ * que llegue a sonar: matarlo antes de que abra el mp3 dejaba el turno mudo.
+ */
 export function stopTyping(): void {
+  if (!tecleo) return
+  const falta = MIN_TECLEO_MS - (Date.now() - tecleoDesde)
+  if (falta > 0) {
+    if (!tecleoStop) {
+      tecleoStop = setTimeout(() => {
+        tecleoStop = null
+        mataTecleo()
+      }, falta)
+    }
+    return
+  }
+  mataTecleo()
+}
+
+/** Lo mata ya (apagado explícito o cierre de lain). */
+function mataTecleo(): void {
+  if (tecleoStop) {
+    clearTimeout(tecleoStop)
+    tecleoStop = null
+  }
   try {
     tecleo?.kill()
   } catch {
@@ -162,5 +197,5 @@ export function stopTyping(): void {
 /** Corta todo sonido (tecleo y aviso). Para el cierre de lain. */
 export function stopSoundAll(): void {
   stopSound()
-  stopTyping()
+  mataTecleo()
 }

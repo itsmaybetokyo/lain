@@ -33,7 +33,7 @@ export function cargaVistos(): Set<string> {
   }
 }
 
-/** Anota lo que ya viste, para no repetírtelo en el próximo arranque. */
+/** Anota lo que ya viste, para poder marcar qué llegó después. */
 export function guardaVistos(ids: Iterable<string>, ahora: number = Date.now()): void {
   try {
     ensureDir(LAIN_DIR)
@@ -50,7 +50,14 @@ export function anotaVisto(...ids: string[]): void {
   guardaVistos(s)
 }
 
-/** Las notas que todavía no te contamos, de la más nueva a la más vieja. */
-export function nuevosDe(entries: WireEntry[], vistos: Set<string>): WireEntry[] {
-  return entries.filter((e) => !vistos.has(e.id)).sort((a, b) => hasta(b.created) - hasta(a.created))
+/**
+ * Las `cupo` notas más nuevas, en orden cronológico (la más vieja primero, que
+ * es como se apilan bajo el retrato). No filtra por "ya visto": abrir lain es
+ * ver qué hay ahora en la Wired. Si filtrara, como lo tuyo se marca al
+ * publicar, no aparecería nunca nada.
+ */
+export function ultimasDe(entries: WireEntry[], cupo: number): WireEntry[] {
+  const n = Math.max(0, Math.floor(cupo))
+  if (!n) return []
+  return [...entries].sort((a, b) => hasta(a.created) - hasta(b.created)).slice(-n)
 }

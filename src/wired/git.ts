@@ -17,6 +17,8 @@ export interface GitResult {
   total: number
   pushed: boolean
   note: string
+  /** Motivo de la falla, para saber si fue falta de llaves (y ofrecer pedirlas). */
+  falla: FallaPush
 }
 
 function git(args: string[], cwd?: string): { ok: boolean; out: string } {
@@ -84,6 +86,58 @@ export function repoDir(cfg: LainConfig): string {
  */
 const asegurados = new Map<string, string>()
 
+/**
+ * Por qué no alcanzamos el repo de la Wired en esta sesión (el texto de git). Lo
+ * usa /wired para no mostrar una copia vacía como si la Wired estuviera sana.
+ */
+const sinWired = new Map<string, string>()
+
+/** Si no pudimos alcanzar la Wired, el motivo crudo. Null si sí pudimos. */
+export function fallaDeClon(cfg: LainConfig): string | null {
+  return sinWired.get(repoDir(cfg)) ?? null
+}
+
+/**
+ * Engancha una Wired que quedó suelta. Pasa cuando el clon falló (repo privado,
+ * sin llaves): queda un repo propio (init + remote) donde tus notas igual se
+ * guardan, pero con la historia desconectada de la Wired de verdad. Y como el
+ * dir ya existe, no se vuelve a clonar nunca: sin esto quedarías para siempre en
+ * una Wired paralela, aun después de que te sumen al repo.
+ *
+ * Es sin estado, así que se corrige solo en el próximo arranque: si el remoto
+ * responde y las historias no comparten nada, lo tuyo se rebasa encima de la
+ * Wired (o se adopta tal cual, si todavía no tenías nada).
+ */
+function conectarHistorias(dir: string): void {
+  // Un clon bueno deja upstream configurado: eso es una Wired normal y no se toca.
+  if (git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], dir).ok) return
+  const rama = git(["symbolic-ref", "--short", "HEAD"], dir).out || "main"
+  const traido = git(["fetch", "origin", rama], dir)
+  if (!traido.ok) {
+    sinWired.set(dir, traido.out || "no pude traer la Wired")
+    return // seguimos sin llave (o el remoto todavía no tiene esa rama)
+  }
+  if (!git(["rev-parse", "--verify", "HEAD"], dir).ok) {
+    // No tenías nada propio: adoptás la Wired tal cual.
+    if (git(["reset", "--hard", "FETCH_HEAD"], dir).ok) {
+      git(["branch", `--set-upstream-to=origin/${rama}`], dir)
+      sinWired.delete(dir)
+    }
+    return
+  }
+  // ¿Comparten historia? Entonces es un repo con su propia vida y no lo tocamos.
+  if (git(["merge-base", "HEAD", "FETCH_HEAD"], dir).ok) {
+    sinWired.delete(dir)
+    return
+  }
+  if (git(["rebase", "FETCH_HEAD"], dir).ok) {
+    git(["branch", `--set-upstream-to=origin/${rama}`], dir)
+    sinWired.delete(dir)
+  } else {
+    git(["rebase", "--abort"], dir) // si se pelean, lo dejamos como estaba
+  }
+}
+
 export function ensureRepo(cfg: LainConfig): string {
   const dir = repoDir(cfg)
   const url = cfg.wiredRepo ?? ""
@@ -92,6 +146,8 @@ export function ensureRepo(cfg: LainConfig): string {
     ensureDir(dirname(dir))
     if (cfg.wiredRepo) {
       const cloned = git(["clone", cfg.wiredRepo, dir])
+      if (cloned.ok) sinWired.delete(dir)
+      else sinWired.set(dir, cloned.out || "no pude clonar")
       if (!cloned.ok && !existsSync(join(dir, ".git"))) {
         ensureDir(dir)
         git(["init", "-b", "main"], dir)
@@ -106,6 +162,9 @@ export function ensureRepo(cfg: LainConfig): string {
     const remotes = git(["remote"], dir).out.split(/\r?\n/).map((s) => s.trim())
     if (remotes.includes("origin")) git(["remote", "set-url", "origin", cfg.wiredRepo], dir)
     else git(["remote", "add", "origin", cfg.wiredRepo], dir)
+    // Si la Wired quedó suelta (clon fallido), enganchamos la historia ahora que
+    // puede que sí tengamos llave.
+    conectarHistorias(dir)
   }
   ensureDir(join(dir, BASE_NODES))
   asegurados.set(dir, url)
@@ -126,13 +185,54 @@ async function commitAsync(dir: string, args: string[]): Promise<void> {
   await gitAsync([...id, "commit", ...args], dir)
 }
 
-/** Por qué no se pudo empujar, en castellano y sin asustar. */
-function pushNote(pushOut: string, upstreamOk: boolean): string {
-  return /could not read Username|Authentication failed|Permission denied|terminal prompts disabled/i.test(pushOut)
-    ? "sin credenciales de git"
-    : upstreamOk
-      ? "sin conexión"
-      : "el repo remoto no tiene rama aún y no pude empujar"
+/**
+ * Por qué no se pudo empujar. Además del texto guardamos el motivo, porque no es
+ * lo mismo un problema de red que no tener llaves: cuando es falta de acceso,
+ * lain puede ofrecer pedirlas (ver wired/acceso.ts).
+ */
+export type FallaPush = "" | "sin-permiso" | "sin-credenciales" | "sin-conexion" | "rechazado" | "sin-rama"
+
+export function fallaDePush(pushOut: string, upstreamOk: boolean): FallaPush {
+  // Ojo con el orden: un 403 de GitHub trae "unable to access", que si no
+  // miramos primero se confundiría con un problema de red.
+  if (/Permission to .+ denied|Permission denied|write access|not authorized|Forbidden|\b403\b/i.test(pushOut)) {
+    return "sin-permiso"
+  }
+  // GitHub contesta "not found" a un repo privado que no ves, para no delatarlo.
+  if (/could not read Username|Authentication failed|terminal prompts disabled|\b401\b|not found/i.test(pushOut)) {
+    return "sin-credenciales"
+  }
+  // Acá sí hay permiso: lo que el repo no acepta es el push.
+  if (/remote rejected|pre-receive hook declined|protected branch|refusing to allow|non-fast-forward/i.test(pushOut)) {
+    return "rechazado"
+  }
+  if (/could not resolve host|unable to access|Failed to connect|timed out|timeout|Connection refused/i.test(pushOut)) {
+    return "sin-conexion"
+  }
+  return upstreamOk ? "sin-conexion" : "sin-rama"
+}
+
+/** ¿Es falta de llaves? Entonces vale la pena ofrecer pedir acceso. */
+export function pideAcceso(falla: FallaPush): boolean {
+  return falla === "sin-permiso" || falla === "sin-credenciales"
+}
+
+/** El mismo motivo, en castellano y sin asustar. */
+export function pushNote(falla: FallaPush): string {
+  switch (falla) {
+    case "sin-permiso":
+      return "la Wired no me deja publicar: no tengo permiso"
+    case "sin-credenciales":
+      return "git no tiene credenciales para la Wired"
+    case "sin-conexion":
+      return "sin conexión"
+    case "rechazado":
+      return "el repo rechazó el push (¿rama protegida?)"
+    case "sin-rama":
+      return "el repo remoto no tiene rama aún y no pude empujar"
+    default:
+      return ""
+  }
 }
 
 function safeHandle(handle: string): string {
@@ -203,43 +303,56 @@ export async function pendingGitAsync(cfg: LainConfig): Promise<number> {
   return ahead.ok ? Number(ahead.out) || 0 : 0
 }
 
+/** Lo que devuelve un intento de subir lo pendiente. */
+export interface FlushResult {
+  pushed: boolean
+  pending: number
+  note: string
+  falla: FallaPush
+}
+
 /** Commitea lo pendiente y empuja al remoto. Seguro de llamar cuando no hay nada. */
-export function flushGit(cfg: LainConfig): { pushed: boolean; pending: number; note: string } {
+export function flushGit(cfg: LainConfig): FlushResult {
   const dir = ensureRepo(cfg)
   git(["add", "-A"], dir)
   if (git(["status", "--porcelain"], dir).out) {
     commit(dir, ["-m", `wired: ${safeHandle(cfg.handle)} sync`])
   }
-  if (pendingGit(cfg) === 0) return { pushed: true, pending: 0, note: "" }
+  if (pendingGit(cfg) === 0) return { pushed: true, pending: 0, note: "", falla: "" }
   const upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], dir)
   let note = ""
   if (upstream.ok && !git(["pull", "--rebase", "--autostash"], dir).ok) {
     note = "no pude hacer pull (¿conflicto?)"
   }
   const push = git(["push", "-u", "origin", "HEAD"], dir)
+  let falla: FallaPush = ""
   if (!push.ok) {
-    const reason = pushNote(push.out, upstream.ok)
-    note = `${note ? note + "; " : ""}${reason}`
+    falla = fallaDePush(push.out, upstream.ok)
+    note = `${note ? note + "; " : ""}${pushNote(falla)}`
   }
-  return { pushed: push.ok, pending: pendingGit(cfg), note }
+  return { pushed: push.ok, pending: pendingGit(cfg), note, falla }
 }
 
 /** Como flushGit, pero el push no bloquea el programa (va en otro proceso). */
-async function flushGitRaw(cfg: LainConfig): Promise<{ pushed: boolean; pending: number; note: string }> {
+async function flushGitRaw(cfg: LainConfig): Promise<FlushResult> {
   const dir = ensureRepo(cfg)
   await gitAsync(["add", "-A"], dir)
   if ((await gitAsync(["status", "--porcelain"], dir)).out) {
     await commitAsync(dir, ["-m", `wired: ${safeHandle(cfg.handle)} sync`])
   }
-  if ((await pendingGitAsync(cfg)) === 0) return { pushed: true, pending: 0, note: "" }
+  if ((await pendingGitAsync(cfg)) === 0) return { pushed: true, pending: 0, note: "", falla: "" }
   const upstream = await gitAsync(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], dir)
   let note = ""
   if (upstream.ok && !(await gitAsync(["pull", "--rebase", "--autostash"], dir)).ok) {
     note = "no pude hacer pull (¿conflicto?)"
   }
   const push = await gitAsync(["push", "-u", "origin", "HEAD"], dir)
-  if (!push.ok) note = `${note ? note + "; " : ""}${pushNote(push.out, upstream.ok)}`
-  return { pushed: push.ok, pending: await pendingGitAsync(cfg), note }
+  let falla: FallaPush = ""
+  if (!push.ok) {
+    falla = fallaDePush(push.out, upstream.ok)
+    note = `${note ? note + "; " : ""}${pushNote(falla)}`
+  }
+  return { pushed: push.ok, pending: await pendingGitAsync(cfg), note, falla }
 }
 
 /**
@@ -257,7 +370,7 @@ function enFila<T>(tarea: () => Promise<T>): Promise<T> {
   return r
 }
 
-export function flushGitAsync(cfg: LainConfig): Promise<{ pushed: boolean; pending: number; note: string }> {
+export function flushGitAsync(cfg: LainConfig): Promise<FlushResult> {
   return enFila(() => flushGitRaw(cfg))
 }
 
@@ -289,7 +402,7 @@ export function publishGit(cfg: LainConfig, entries: WireEntry[]): GitResult {
     commit(dir, ["-m", `wired: ${handle} +${added}`])
   }
   const f = flushGit(cfg)
-  return { added, total: readEntries(dir).length, pushed: f.pushed, note: f.note }
+  return { added, total: readEntries(dir).length, pushed: f.pushed, note: f.note, falla: f.falla }
 }
 
 /** Como publishGit, sin frenar la conversación mientras empuja. */
@@ -303,7 +416,7 @@ async function publishGitRaw(cfg: LainConfig, entries: WireEntry[]): Promise<Git
     await commitAsync(dir, ["-m", `wired: ${handle} +${added}`])
   }
   const f = await flushGitRaw(cfg)
-  return { added, total: readEntries(dir).length, pushed: f.pushed, note: f.note }
+  return { added, total: readEntries(dir).length, pushed: f.pushed, note: f.note, falla: f.falla }
 }
 
 export function publishGitAsync(cfg: LainConfig, entries: WireEntry[]): Promise<GitResult> {

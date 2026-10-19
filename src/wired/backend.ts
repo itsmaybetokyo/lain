@@ -15,6 +15,8 @@ export interface PublishResult {
   total: number
   pushed: boolean
   note: string
+  /** Motivo de la falla (vacío si se empujó). Ver wired/acceso.ts para las llaves. */
+  falla: git.FallaPush
 }
 
 /** Foto del estado global de la Wired (para el indicador y los informes). */
@@ -58,9 +60,19 @@ export async function behind(cfg: LainConfig): Promise<number> {
 }
 
 /** Commitea lo que falte y empuja. No-op sin cambios; nunca requiere intervención. */
-export async function flush(cfg: LainConfig): Promise<{ pushed: boolean; pending: number; note: string }> {
-  if (!isGit(cfg)) return { pushed: true, pending: 0, note: "" }
+export async function flush(cfg: LainConfig): Promise<git.FlushResult> {
+  if (!isGit(cfg)) return { pushed: true, pending: 0, note: "", falla: "" }
   return git.flushGitAsync(cfg)
+}
+
+/** ¿La falla fue falta de llaves? Entonces vale la pena ofrecer pedirlas. */
+export function pideAcceso(falla: string): boolean {
+  return git.pideAcceso(falla as git.FallaPush)
+}
+
+/** Por qué falló el clon de la Wired, si falló (si no, null). */
+export function fallaDeClon(cfg: LainConfig): string | null {
+  return isGit(cfg) ? git.fallaDeClon(cfg) : null
 }
 
 export async function health(cfg: LainConfig): Promise<Health> {
@@ -72,8 +84,11 @@ export async function health(cfg: LainConfig): Promise<Health> {
 export async function publish(cfg: LainConfig, entries: WireEntry[]): Promise<PublishResult> {
   if (isGit(cfg)) return git.publishGitAsync(cfg, entries)
   const r = await relay.publish(cfg.wiredUrl, { nodeId: cfg.nodeId, handle: cfg.handle, entries })
-  return { added: r.added, total: r.total, pushed: true, note: "" }
+  return { added: r.added, total: r.total, pushed: true, note: "", falla: "" }
 }
+
+// Pedir las llaves de la Wired: arma el pedido y la URL del issue (wired/acceso.ts).
+export { cuerpoDelPedido, repoDeAcceso, slugDeRepo, tituloDelPedido, urlDelPedido } from "./acceso.js"
 
 export async function search(cfg: LainConfig, q: string): Promise<WireEntry[]> {
   if (isGit(cfg)) return git.searchGitAsync(cfg, q)

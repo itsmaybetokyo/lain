@@ -40,6 +40,9 @@ export function stripAnsi(s: string): string {
 
 /** Recorta respetando los códigos ANSI. */
 export function truncateVisible(s: string, max: number): string {
+  // Si ya entra, se devuelve tal cual: recortar acá le comería el último
+  // carácter a una línea que mide justo el ancho disponible.
+  if (stripAnsi(s).length <= max) return s
   let vis = 0
   let out = ""
   let i = 0

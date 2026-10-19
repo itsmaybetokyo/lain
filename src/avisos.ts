@@ -8,6 +8,8 @@ export interface Aviso {
   cuando: number
   /** Si ya quedó en tu vault. */
   bajado: boolean
+  /** Llegó desde la última vez que abriste lain. */
+  nueva?: boolean
 }
 
 /** Tope de avisos guardados: cuando se llena, cae el más viejo. */
@@ -58,7 +60,7 @@ export function avisoLinesOne(a: Aviso, maxCols = Infinity): string[] {
       ? a.quien.join(", ")
       : `${a.quien.slice(0, 2).join(", ")} +${a.quien.length - 2}`
     : ""
-  const detalle = [a.detalle, quien ? `de ${quien}` : ""].filter(Boolean).join(" · ")
+  const detalle = [a.nueva ? "nueva" : "", a.detalle, quien ? `de ${quien}` : ""].filter(Boolean).join(" · ")
   if (detalle) out.push("    " + paint(C.brcyan, detalle))
   const pie = [hhmm(a.cuando), a.bajado ? "ya en tu vault" : ""].filter(Boolean).join(" · ")
   if (pie) out.push("    " + paint(C.dim, pie))

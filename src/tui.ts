@@ -14,6 +14,32 @@ function padTo(s: string, w: number): string {
   return n > 0 ? t + " ".repeat(n) : t
 }
 
+/** Un tick del efecto letra por letra (≈55 letras por segundo). */
+const TYPE_TICK_MS = 18
+/** Cuánta cola aguantamos antes de soltar más de una letra por tick. */
+const TYPE_BACKLOG = 120
+const TYPE_BACKLOG_BIG = 480
+/** Si no llega texto por este rato, el sonido de tecleo se detiene. */
+const TYPE_IDLE_MS = 1200
+
+/**
+ * Cuántas letras suelta cada tick. Siempre de a una; solo si el modelo se
+ * adelanta mucho se apura, y nunca más de tres: si no, deja de verse el efecto.
+ */
+export function letrasPorTick(cola: number): number {
+  if (cola > TYPE_BACKLOG_BIG) return 3
+  if (cola > TYPE_BACKLOG) return 2
+  return 1
+}
+
+/** No parte un par sustituto (emoji) al medio. */
+function corteSeguro(s: string, n: number): number {
+  if (n <= 0) return 0
+  if (n >= s.length) return s.length
+  const code = s.charCodeAt(n - 1)
+  return code >= 0xd800 && code <= 0xdbff ? n + 1 : n
+}
+
 /** Envuelve texto plano (sin ANSI) en líneas de ancho `width`. */
 export function wrapText(text: string, width: number): string[] {
   const out: string[] = []
@@ -102,10 +128,15 @@ export class Tui {
   /** Cola del efecto "letra por letra": el texto llega en tokens, se suelta de a poco. */
   private typeQueue = ""
   private typeTimer: NodeJS.Timeout | null = null
+  /** Quien espera a que se vacíe la cola (endStream). */
+  private typeWaiter: (() => void) | null = null
+  /** Corta el sonido de tecleo si el texto se queda quieto un rato. */
+  private typeIdle: NodeJS.Timeout | null = null
   private typing = false
   private statusL = ""
   private statusR = ""
-  private stats = ""
+  /** La barra de abajo: un texto fijo o algo que se arma con el ancho real. */
+  private stats: string | ((cols: number) => string) = ""
   private promptLabel = "› "
   private spin = 0
   private scroll = 0
@@ -185,7 +216,7 @@ export class Tui {
   stop(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = null
-    this.stopType()
+    this.flushTyping()
     if (this.escTimer) clearTimeout(this.escTimer)
     this.escTimer = null
     if (this.tty) {
@@ -492,8 +523,8 @@ export class Tui {
   }
 
   /** Barra de abajo: tokens y velocidad. Se repinta con cada delta. */
-  setStats(text: string): void {
-    this.stats = text
+  setStats(barra: string | ((cols: number) => string)): void {
+    this.stats = barra
   }
 
   /** Cambia la etiqueta del spinner mientras lain trabaja. */
@@ -666,45 +697,83 @@ export class Tui {
     }
     // El modelo entrega tokens; acá se sueltan de a poco para el efecto "letra por letra".
     this.typeQueue += chunk
-    if (!this.typeTimer) {
-      this.typeTimer = setInterval(() => this.drainType(), 18)
-      this.setTyping(true)
-    }
+    this.setTyping(true)
+    this.armaIdle()
+    if (!this.typeTimer) this.typeTimer = setInterval(() => this.drainType(), TYPE_TICK_MS)
   }
 
-  /** Suelta unas letras de la cola; si se acumuló mucho, suelta más para no quedar atrás. */
+  /** Suelta unas letras de la cola; si se acumuló mucho, apura un poco (nunca de golpe). */
   private drainType(): void {
     if (this.busy === null || this.typeQueue.length === 0) {
-      this.stopType()
+      this.stopDrain()
+      if (this.typeWaiter) this.cierraTipeo()
       return
     }
-    const n = this.typeQueue.length > 120 ? 10 : this.typeQueue.length > 48 ? 4 : this.typeQueue.length > 16 ? 2 : 1
-    const take = this.typeQueue.slice(0, n)
-    this.typeQueue = this.typeQueue.slice(n)
+    const k = corteSeguro(this.typeQueue, letrasPorTick(this.typeQueue.length))
+    const take = this.typeQueue.slice(0, k)
+    this.typeQueue = this.typeQueue.slice(k)
     this.busy = sinGuionesLargos(this.busy + take)
     this.refresh()
   }
 
-  private stopType(): void {
+  /** Suelta lo que falte de una (ctrl+x mientras se escribe). */
+  flushTyping(): void {
+    if (this.typeQueue) {
+      if (this.busy !== null) this.busy = sinGuionesLargos(this.busy + this.typeQueue)
+      this.typeQueue = ""
+    }
+    this.cierraTipeo()
+  }
+
+  private stopDrain(): void {
     if (this.typeTimer) clearInterval(this.typeTimer)
     this.typeTimer = null
+  }
+
+  /** Corta la animación y avisa que ya no se está escribiendo. */
+  private cierraTipeo(): void {
+    this.stopDrain()
+    if (this.typeWaiter) {
+      const r = this.typeWaiter
+      this.typeWaiter = null
+      r()
+    }
+    if (this.typeIdle) {
+      clearTimeout(this.typeIdle)
+      this.typeIdle = null
+    }
     this.setTyping(false)
+  }
+
+  /** El sonido de tecleo se corta si pasa un rato sin texto nuevo. */
+  private armaIdle(): void {
+    if (this.typeIdle) clearTimeout(this.typeIdle)
+    this.typeIdle = setTimeout(() => {
+      this.typeIdle = null
+      this.setTyping(false)
+    }, TYPE_IDLE_MS)
   }
 
   /** Avisa al exterior (sonido de tecleo) cuando se empieza o deja de escribir. */
   private setTyping(on: boolean): void {
+    if (on && this.typeIdle) {
+      clearTimeout(this.typeIdle)
+      this.typeIdle = null
+    }
     if (this.typing === on) return
     this.typing = on
     this.onTyping?.(on)
   }
 
-  endStream(finalText?: string): string {
-    // Vaciamos la cola antes de cerrar: lo que faltaba de tipear aparece de una.
-    this.stopType()
-    if (this.typeQueue) {
-      if (this.busy !== null) this.busy = sinGuionesLargos(this.busy + this.typeQueue)
-      this.typeQueue = ""
+  /**
+   * Cierra el turno. Si todavía quedan letras en la cola se siguen escribiendo
+   * —no aparecen de golpe— y recién cuando termina se fija el mensaje.
+   */
+  async endStream(finalText?: string): Promise<string> {
+    if (this.typeQueue.length && this.busy !== null) {
+      await new Promise<void>((r) => (this.typeWaiter = r))
     }
+    this.cierraTipeo()
     const streamed = this.busy ?? ""
     if (this.timer) clearInterval(this.timer)
     this.timer = null
@@ -832,7 +901,8 @@ export class Tui {
       }
       buf.push(`\x1b[${row};1H\x1b[2K${content}`)
     }
-    buf.push(`\x1b[${rows};1H\x1b[2K${truncateVisible(" " + this.stats, cols)}`)
+    const pie = " " + (typeof this.stats === "function" ? this.stats(cols) : this.stats)
+    buf.push(`\x1b[${rows};1H\x1b[2K${truncateVisible(pie, cols)}`)
     this.out.write(buf.join(""))
 
     const col = Math.min(cols, plan.leftW + divW + pref + visLen(shown) + 1)

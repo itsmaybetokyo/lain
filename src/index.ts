@@ -7,7 +7,7 @@ import { installLauncher, uninstallLauncher } from "./install.js"
 import { Brain } from "./brain.js"
 import { mascot, type ArtMode } from "./mascot.js"
 import { C, paint, sleep, S } from "./theme.js"
-import { Tui, visLen, type Role } from "./tui.js"
+import { Tui, visLen, wrapText, type Role } from "./tui.js"
 import {
   ensureVault,
   writeExchange,
@@ -21,8 +21,8 @@ import * as wired from "./wired/backend.js"
 import type { Snapshot } from "./wired/backend.js"
 import type { WireEntry } from "./wired/protocol.js"
 import { entropyOf, type Entropy } from "./wired/entropy.js"
-import { anotaVisto, cargaVistos, guardaVistos, nuevosDe } from "./wired/visto.js"
-import { barraAbajo as barraDeAbajo, type WiredBar } from "./bar.js"
+import { anotaVisto, cargaVistos, guardaVistos, ultimasDe } from "./wired/visto.js"
+import { barraDeAbajo, AYUDA_BARRA, type WiredBar } from "./bar.js"
 import * as mux from "./mux.js"
 import * as local from "./local.js"
 import { speak, isMuted, setMuted, stopSpeech } from "./tts.js"
@@ -94,6 +94,7 @@ async function main(): Promise<void> {
   if (cmd === "vault") return openVault(cfg, consoleEmit)
   if (cmd === "search") return doSearch(cfg, argv.slice(1).join(" "), consoleEmit)
   if (cmd === "publish") return doPublish(cfg, undefined, consoleEmit)
+  if (cmd === "acceso") return doAcceso(cfg, consoleEmit)
   if (cmd === "sync") return doSync(cfg, consoleEmit)
   if (cmd === "update") return doUpdate(consoleEmit)
   if (cmd === "install") return doInstall(consoleEmit, !argv.slice(1).includes("--no-path"))
@@ -117,10 +118,10 @@ function modelLabel(cfg: LainConfig, brain?: Brain): string {
 }
 
 /** La barra de abajo entera: the wired · tokens · entropía · límite. */
-function barraAbajo(brain?: Brain): string {
-  const base = barraDeAbajo({ wired: estadoWired, brain, entropy })
-  const l = limit.limitLabel()
-  return l ? base + paint(C.dim, "  ·  ") + paint(C.bryellow, `límite en ${l}`) : base
+function barraAbajo(brain?: Brain): (cols: number) => string {
+  // Se arma con el ancho real: así se estira hasta el borde de la terminal.
+  return (cols) =>
+    barraDeAbajo({ wired: estadoWired, brain, entropy, limite: limit.limitLabel() || undefined, cols })
 }
 
 function statusLeft(cfg: LainConfig): string {
@@ -362,24 +363,26 @@ async function bajaDeLaWired(cfg: LainConfig): Promise<boolean> {
 }
 
 /**
- * Al abrir, te cuenta lo último de la Wired: las notas más nuevas que todavía no
- * te anunciamos, tuyas o de otros. Entran asentadas —sin sonido ni animación— y
- * solo las que caben en el panel; lo que viste queda anotado en ~/.lain para no
- * repetírtelo cada vez.
+ * Al abrir, te cuenta lo último de la Wired: las notas más nuevas, tuyas o de
+ * otros. Entran asentadas —sin sonido ni animación— y solo las que caben en el
+ * panel. Las que no habías visto llevan "nueva"; lo que ya te anunciamos queda
+ * anotado en ~/.lain para poder marcarlo.
  */
 async function pendientesDeLaWired(tui: Tui, cfg: LainConfig): Promise<void> {
   try {
     const todas = await wired.allEntries(cfg)
-    const nuevas = nuevosDe(todas, cargaVistos())
-    guardaVistos(todas.map((e) => e.id)) // aunque alguna no entre, ya la viste
-    if (!nuevas.length) return
+    if (!todas.length) return
 
     // Cada aviso ocupa 3 filas y una más de aire: entran los que dé el panel.
     const libre = Math.max(0, tui.leftBudget() - artLines(cfg).length)
     const cupo = Math.max(1, Math.min(AVISOS_MAX, Math.floor((libre + 1) / 4)))
+    const vistos = cargaVistos()
+    const ultimas = ultimasDe(todas, cupo)
+    guardaVistos(todas.map((e) => e.id))
+
     const bajaron = await bajaDeLaWired(cfg) // lo de otros queda en tu vault
 
-    for (const e of nuevas.slice(0, cupo).reverse()) {
+    for (const e of ultimas) {
       const t = Date.parse(e.created)
       apilaAviso({
         titulo: e.title,
@@ -388,12 +391,13 @@ async function pendientesDeLaWired(tui: Tui, cfg: LainConfig): Promise<void> {
         cuando: Number.isFinite(t) ? t : Date.now(),
         // Lo tuyo ya está en tu vault; lo de otros, solo si esta pasada lo bajó.
         bajado: e.nodeId === cfg.nodeId || bajaron,
+        nueva: !vistos.has(e.id),
       })
     }
     quietarAnim()
     refreshLeft(tui, cfg)
 
-    const sobran = nuevas.length - cupo
+    const sobran = todas.length - ultimas.length
     if (sobran > 0) tui.push("system", `y ${sobran} nota(s) más de la Wired, más viejas que esas`)
   } catch {
     /* sin red o sin repo: no molestamos al abrir */
@@ -420,21 +424,55 @@ function publicaEnWired(tui: Tui, cfg: LainConfig, entry: WireEntry): void {
     try {
       const r = await wired.publish(cfg, [entry])
       if (r.added > 0) {
-        tui.push("system", `publicado en ${wired.label(cfg)} (+${r.added})`)
-        anotaVisto(entry.id) // ya te lo contamos acá: que no reaparezca al abrir
+        tui.push("system", r.pushed ? `publicado en ${wired.label(cfg)} (+${r.added})` : `guardado para la Wired (+${r.added})`)
+        anotaVisto(entry.id) // ya te lo contamos acá: si vuelve a abrir, no la marcamos como nueva
         // Aviso bajo el retrato: tu propio movimiento en la Wired también avisa.
         avisoWired(tui, cfg, {
-          titulo: "lo tuyo ya está en la Wired",
+          titulo: r.pushed ? "lo tuyo ya está en la Wired" : "lo tuyo espera para la Wired",
           detalle: r.pushed ? `+${r.added} al repo de todos` : `+${r.added} guardado, sube solo`,
           bajado: true,
         })
       }
-      if (!r.pushed && r.note) tui.push("system", `Wired: ${r.note} · reintentaré solo`)
+      fallaDeWired((text, role = "plain", blank = true) => tui.push(role, text, blank), r)
       await refreshEntropy(tui, cfg, true)
     } catch {
       tui.push("system", wired.hint(cfg))
     }
   })
+}
+
+/**
+ * Una subida que no subió. Cuando el motivo es falta de llaves (repo privado,
+ * sin permiso, sin credenciales) lo decimos y ofrecemos pedirlas: /acceso arma
+ * el pedido y lo abre en el navegador, en el repo público de lain, donde el
+ * dueño de la Wired lo ve. Lo que se sube nunca se pierde: queda pendiente.
+ */
+function fallaDeWired(emit: Emit, r: { note: string; falla: string }): void {
+  if (!r.note) return
+  emit(`Wired: ${r.note} · reintentaré solo`, "system")
+  if (wired.pideAcceso(r.falla)) {
+    emit("me falta la llave de esa Wired. escribí /acceso y te armo el pedido al dueño", "system")
+  }
+}
+
+/**
+ * Pedir las llaves de la Wired. No hace falta gh ni token: armamos el issue con
+ * título y cuerpo ya escritos y lo abre el navegador, donde la persona lo manda.
+ * Igual imprimimos la URL: si el navegador no abre, se manda a mano.
+ */
+function doAcceso(cfg: LainConfig, emit: Emit, falla?: string): void {
+  const url = wired.urlDelPedido(cfg, falla)
+  if (!url) {
+    emit(`no sé dónde pedir acceso: ${wired.repoDeAcceso(cfg)} no es un repo de GitHub`, "error")
+    emit("poné un repo público en accessRepo (config.json) y lo intento de nuevo", "system")
+    return
+  }
+  emit("pedido de acceso a la Wired", "title")
+  emit(`handle: ${cfg.handle} · nodeId: ${cfg.nodeId}`, "system", false)
+  emit(`la Wired: ${wired.label(cfg)}`, "system")
+  emit("te abro el pedido en el navegador: revisalo y apretá «Submit new issue».", "system")
+  emit(url, "system")
+  launch(url)
 }
 
 function entropyReport(e: Entropy, where: string): Array<[string, string]> {
@@ -474,11 +512,13 @@ async function animateMascot(tui: Tui, cfg: LainConfig): Promise<void> {
 
 const HELPROWS: Array<[string, string]> = [
   ["<texto>", "habla con lain (responde opencode, se guarda en tu vault)"],
+  ["/barra", "qué significa cada número de la barra de abajo"],
   ["/model", "elige modelo (proveedor + modelo); se guarda para siempre"],
   ["/art", "retrato de Lain: suave / compacto / completo"],
   ["/vault", "abre tu vault de Obsidian ahora mismo"],
   ["/whoami", "tu identidad y lo que almacenas"],
   ["/publish [--last N]", "sube tu conocimiento a la Wired (todo o los últimos N)"],
+  ["/acceso", "no podés publicar: te armo el pedido de llaves y lo abro en el navegador"],
   ["/search <q>", "busca en el conocimiento global de la Wired"],
   ["/sync", "baja el conocimiento de otros nodos a tu vault (WIRED/nodes)"],
   ["/local", "el tiempo y un par de titulares de tu ciudad · /local <ciudad> la fija"],
@@ -572,6 +612,12 @@ async function repl(cfg: LainConfig): Promise<void> {
       if (name === "task") return // de eso se encarga el recuadro del subagente
       tui.push("tool", `herramienta ⟐ ${name}`, false)
     },
+    onPermiso: (p) => {
+      // opencode pregunta y no hay quién conteste: lain concede (o corta el
+      // bucle) y lo dice, así se ve qué tocó fuera de la carpeta de trabajo.
+      const que = p.patron ? `${p.tipo} (${p.patron})` : p.tipo
+      tui.push("tool", `⟐ permiso ⟐ ${que} · ${p.respuesta === "reject" ? "rechazado" : "concedido"}`, false)
+    },
     onSubtask: (s) => {
       subagente = s ? { descripcion: s.descripcion, agente: s.agente, desde: s.desde } : null
       tui.setSubagente(subagente)
@@ -661,7 +707,7 @@ async function repl(cfg: LainConfig): Promise<void> {
         if (r.pending !== lastPending) {
           const subio = lastPending > 0 && r.pending === 0
           lastPending = r.pending
-          if (r.pending > 0 && r.note) tui.push("system", `Wired: ${r.note} · reintentaré solo`)
+          if (r.pending > 0) fallaDeWired(emit, r)
           else if (r.pending === 0) tui.push("system", "Wired al día.")
           if (subio) avisoWired(tui, cfg, { titulo: "lo tuyo ya está en la Wired", detalle: "empujado al repo de todos", bajado: true })
           await repintaEstado(tui, cfg)
@@ -710,6 +756,8 @@ async function repl(cfg: LainConfig): Promise<void> {
     cutAsked = true
     stopSpeech()
     sound.stopTyping()
+    // Si el modelo ya terminó y solo queda la animación, se suelta de una.
+    tui.flushTyping()
     tui.push("system", "frenando…", false)
     void brain.abort()
   }
@@ -723,6 +771,12 @@ async function repl(cfg: LainConfig): Promise<void> {
     if (line === "/exit" || line === "/quit" || line === "exit") break
     if (line === "/help" || line === "help") {
       tui.pushBox("comandos", HELPROWS.map(([k, v]) => `${k.padEnd(18)} ${v}`))
+      continue
+    }
+    if (line === "/barra" || line === "/bar") {
+      const lineas: string[] = []
+      for (const [k, v] of AYUDA_BARRA) lineas.push(...wrapText(`${k.padEnd(10)} ${v}`, 56))
+      tui.pushBox("la barra de abajo", lineas)
       continue
     }
     if (line === "/whoami") {
@@ -817,6 +871,10 @@ async function repl(cfg: LainConfig): Promise<void> {
       await refreshEntropy(tui, cfg, true)
       tui.setStatus(statusLeft(cfg), statusRight(cfg, brain))
       tui.refresh()
+      continue
+    }
+    if (line === "/acceso" || line === "/llave") {
+      doAcceso(cfg, emit)
       continue
     }
     if (line.startsWith("/search")) {
@@ -949,7 +1007,7 @@ async function repl(cfg: LainConfig): Promise<void> {
     tui.setStats(barraAbajo(brain))
     try {
       const answer = await brain.ask(prompt)
-      const text = tui.endStream(answer)
+      const text = await tui.endStream(answer)
       tui.setStats(barraAbajo(brain))
       if (text) speak(text)
       const stop = brain.lastStop
@@ -978,7 +1036,7 @@ async function repl(cfg: LainConfig): Promise<void> {
       tui.push("system", `guardado en la Wired local: ${entry.id}  #${entry.tags.slice(0, 3).join(" #")}`)
       if (cfg.publish === "public" || cfg.publish === "all") publicaEnWired(tui, cfg, entry)
     } catch (err) {
-      tui.endStream()
+      await tui.endStream()
       tui.setStats(barraAbajo(brain))
       tui.push("error", (err as Error).message)
     } finally {
@@ -1037,6 +1095,14 @@ async function wiredStatus(cfg: LainConfig, emit: Emit): Promise<void> {
     emit(`protocolo 7 · ${h.entries} entradas · ${h.nodes} nodos`, "system")
     const e = entropyOf(ns, h.entries)
     emit(`entropía global ${e.bar} ${e.pct}% · ${e.verdict}`, "system")
+    // Si el clon falló, esta Wired de arriba es nuestra copia vacía: decirlo, o
+    // parece que la Wired está sana y vacía (y no: es que no la alcanzamos).
+    const fallaClon = wired.fallaDeClon(cfg)
+    if (fallaClon && h.entries === 0) {
+      emit(`no pude clonar la Wired: ${fallaClon.split("\n")[0]}`, "error", false)
+      emit("esta foto es de una copia vacía; la Wired real puede ser privada.", "system")
+      emit("pedí las llaves con /acceso (o mirá el remoto: git -C <clon> remote -v)", "system")
+    }
   const pending = await wired.pending(cfg)
     if (pending > 0) emit(`${pending} sin empujar (se reintenta solo cada minuto)`, "system")
     for (const n of ns) {
@@ -1059,8 +1125,9 @@ async function doPublish(cfg: LainConfig, lastN: number | undefined, emit: Emit)
   }
   try {
     const r = await wired.publish(cfg, entries)
-    emit(`publicado ${r.added} nuevo(s) de ${entries.length} · total en la Wired: ${r.total}`, "ok")
-    if (!r.pushed && r.note) emit(`${r.note} · reintentaré solo`, "system")
+    if (r.pushed) emit(`publicado ${r.added} nuevo(s) de ${entries.length} · total en la Wired: ${r.total}`, "ok")
+    else emit(`guardado ${r.added} nuevo(s) de ${entries.length} (todavía no subió)`, "system")
+    fallaDeWired(emit, r)
   } catch {
     emit(wired.hint(cfg), "error")
   }
@@ -1239,7 +1306,7 @@ function printHelp(emit: Emit): void {
   for (const [k, v] of HELPROWS) emit(`${k.padEnd(20)} ${v}`, "plain", false)
   emit("", "plain", false)
   emit("CLI:  lain wired [puerto]  ·  lain wired git <url-repo>  ·  lain models", "system", false)
-  emit("      lain vault  ·  lain search <q>  ·  lain publish  ·  lain sync", "system", false)
+  emit("      lain vault  ·  lain search <q>  ·  lain publish  ·  lain sync  ·  lain acceso", "system", false)
   emit("modelo:  lain --model provider/model   (ej. opencode/space-bunny-free)", "system")
 }
 

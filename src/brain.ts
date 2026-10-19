@@ -24,12 +24,38 @@ export interface BrainEvents {
   onReasoning?: () => void
   /** Subagente en curso (o `null` cuando termina): alimenta el recuadro del composer. */
   onSubtask?: (s: { id: string; descripcion: string; agente: string; desde: number } | null) => void
+  /** opencode pidió un permiso y lain lo contestó (si no, el turno se cuelga). */
+  onPermiso?: (p: { tipo: string; patron: string; respuesta: RespuestaPermiso }) => void
+}
+
+/** Lo que acepta opencode al contestar un permiso. */
+export type RespuestaPermiso = "once" | "always" | "reject"
+
+/** Eventos que muestran trabajo real: un permiso esperando no es progreso. */
+const esProgreso = (tipo: unknown): boolean =>
+  tipo === "message.part.delta" ||
+  tipo === "message.part.updated" ||
+  tipo === "message.updated" ||
+  tipo === "session.idle"
+
+/**
+ * Qué contestamos cuando opencode pide un permiso. Nadie más puede hacerlo, así
+ * que la política es explícita: se concede de a uno (nunca "siempre", que
+ * quedaría como un permiso permanente que no pediste); el detector de bucles se
+ * rechaza, porque quiere decir que el agente se está repitiendo.
+ */
+export function respondePermiso(tipo: string): RespuestaPermiso {
+  if (tipo === "doom_loop") return "reject"
+  return "once"
 }
 
 /** Cuánto silencio aguantamos antes de dar por colgado el turno. */
 const WATCHDOG_MS = Math.max(15_000, Number(process.env.LAIN_WATCHDOG_MS ?? 120_000) || 120_000)
 
 const recorta = (s: string, n = 160): string => (s.length > n ? s.slice(0, n - 1) + "…" : s)
+
+/** Señales de que el problema es la conexión, no el modelo. */
+const FALLA_DE_RED = /fetch failed|econnrefused|enotfound|eai_again|etimedout|socket hang up|network|connection (reset|refused|closed)/i
 
 /**
  * Traduce el error del proveedor a algo que se entienda. opencode entrega la
@@ -44,6 +70,9 @@ export function explainError(err: unknown): string {
   const status: number | undefined = e?.data?.statusCode ?? e?.statusCode
   const body: string = String(e?.data?.responseBody ?? e?.responseBody ?? "")
   const todo = `${msg} ${body}`.toLowerCase()
+  // undici esconde la causa real en `cause` (p. ej. UND_ERR_HEADERS_TIMEOUT).
+  const causa = e?.cause ?? e?.data?.cause ?? e?.error?.cause
+  const codigo = String(causa?.code ?? causa?.errno ?? "")
   const conDetalle = (razon: string, extra = msg): string =>
     extra && extra !== razon ? `${razon} · ${recorta(extra.replace(/\s+/g, " "))}` : razon
 
@@ -78,10 +107,19 @@ export function explainError(err: unknown): string {
     if (status === 500 || status === 502 || status === 503 || status === 504 || /overload|unavailable|internal error|bad gateway/.test(todo)) {
       return conDetalle(`el proveedor está caído o saturado (${status ?? 503}) · reintenta o cambia de modelo`, msg)
     }
+    if (FALLA_DE_RED.test(todo)) {
+      return conDetalle("no hay red hacia el proveedor (o no contesta)", codigo ? `${msg} · ${codigo}` : msg)
+    }
     return conDetalle(`el proveedor devolvió un error (${status ?? "sin código"})`, msg)
   }
-  if (/fetch failed|econnrefused|enotfound|eai_again|etimedout|socket hang up|network|connection (reset|refused|closed)/i.test(msg)) {
-    return conDetalle("no hay red hacia el proveedor (o no contesta)", msg)
+  if (/^UND_ERR_(HEADERS|BODY|CONNECT)_TIMEOUT$/.test(codigo)) {
+    return conDetalle("el servidor de opencode dejó de contestar (el turno se quedó esperando)", codigo)
+  }
+  if (codigo === "ECONNREFUSED") {
+    return conDetalle("el servidor local de opencode no está o se cerró · cerrá y abrí lain", codigo)
+  }
+  if (FALLA_DE_RED.test(msg)) {
+    return conDetalle("no hay red hacia el proveedor (o no contesta)", codigo ? `${msg} · ${codigo}` : msg)
   }
   return recorta(msg.replace(/\s+/g, " ")) || "algo falló y no me dijeron qué"
 }
@@ -194,6 +232,8 @@ export class Brain {
   usedModel?: { providerID: string; modelID: string }
   /** Subagente (herramienta task) que está corriendo, si lo hay. */
   private subActivo: string | null = null
+  /** Permisos ya contestados en este turno: no se contesta dos veces el mismo. */
+  private permisosVistos = new Set<string>()
   /** Carpeta donde trabajan lain y sus subagentes (nunca la de instalación). */
   private workDir: string = process.cwd()
 
@@ -223,9 +263,15 @@ export class Brain {
     try {
       for await (const ev of stream) {
         const p = ev?.properties ?? {}
+        // El pedido de permiso puede venir de un subagente (otra sesión) y nadie
+        // más lo contesta: se atiende antes del filtro o el turno queda colgado.
+        if (ev?.type === "permission.updated") {
+          void this.contestaPermiso(p)
+          continue
+        }
+        // Solo el trabajo real es señal de vida: esperar un permiso no avanza.
+        if (esProgreso(ev?.type)) this.lastSignal = Date.now()
         if (p.sessionID && p.sessionID !== this.sessionId) continue
-        // Cualquier cosa que llegue cuenta como señal de vida del turno.
-        this.lastSignal = Date.now()
         switch (ev?.type) {
           case "message.part.delta":
             if (p.field === "text" && typeof p.delta === "string") {
@@ -288,6 +334,31 @@ export class Brain {
       }
     } catch {
       /* stream cerrado */
+    }
+  }
+
+  /**
+   * opencode pregunta por cosas fuera de la carpeta de trabajo (el vault, el
+   * clon de la Wired) y espera respuesta. En una TUI la das vos; acá no hay a
+   * quién preguntar, y sin respuesta el turno quedaba colgado hasta que el SDK
+   * se rendía con un "fetch failed".
+   */
+  private async contestaPermiso(p: any): Promise<void> {
+    const id = String(p?.id ?? "")
+    if (!id || this.permisosVistos.has(id)) return
+    this.permisosVistos.add(id)
+    const tipo = String(p?.type ?? "")
+    const patron = Array.isArray(p?.pattern) ? p.pattern.join(", ") : String(p?.pattern ?? "")
+    const respuesta = respondePermiso(tipo)
+    this.events.onPermiso?.({ tipo, patron, respuesta })
+    try {
+      await this.client.postSessionIdPermissionsPermissionId({
+        path: { id: String(p?.sessionID ?? this.sessionId), permissionID: id },
+        query: { directory: this.workDir },
+        body: { response: respuesta },
+      })
+    } catch {
+      /* si no se pudo contestar, el vigilante corta el turno */
     }
   }
 
@@ -361,6 +432,7 @@ export class Brain {
         this.lastTool = ""
         this.reasoningNotified = false
         this.partTypes.clear()
+        this.permisosVistos.clear()
         this.aborted = false
         this.stopReason = ""
         this.errEvent = ""
@@ -433,6 +505,9 @@ export class Brain {
       this.cutResolver = null
       this.tEnd = Date.now()
       this.desarmaPerro()
+      // Turno cerrado (terminara bien o mal): no queda un subagente en el recuadro.
+      this.subActivo = null
+      this.events.onSubtask?.(null)
     }
   }
 

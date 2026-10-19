@@ -52,6 +52,13 @@ export interface LainConfig {
    * Por defecto ~/.lain/work, para no ensuciar la carpeta donde vive lain.
    */
   workDir?: string
+  /**
+   * Repo público donde se piden las llaves de la Wired cuando no se puede
+   * publicar. Por defecto, el de lain: de ahí se bajó el programa, así que es el
+   * único lugar que esa persona alcanza con seguridad (el de la Wired puede ser
+   * privado, y un repo privado no deja abrir issues a quien no lo ve).
+   */
+  accessRepo?: string
 }
 
 /**
@@ -60,6 +67,14 @@ export interface LainConfig {
  * hay que ser colaborador. Se cambia con `/wired git <url>` o `lain wired git <url>`.
  */
 export const WIRED_REPO_DEFAULT = "https://github.com/itsmaybetokyo/wired"
+
+/**
+ * Dónde se piden las llaves de la Wired. Tiene que ser un repo que cualquiera
+ * pueda alcanzar: los issues de un repo privado solo los ve quien ya tiene
+ * acceso, así que el pedido va al repo público de lain (de ahí se bajó el
+ * programa). Se cambia con `accessRepo` en config.json.
+ */
+export const ACCESS_REPO_DEFAULT = "https://github.com/itsmaybetokyo/lain"
 
 export const LAIN_DIR = process.env.LAIN_HOME ?? join(homedir(), ".lain")
 const CONFIG_FILE = join(LAIN_DIR, "config.json")

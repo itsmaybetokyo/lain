@@ -1,7 +1,7 @@
 import { Tui } from "../src/tui.js"
 import { mascot } from "../src/mascot.js"
 import { C, paint } from "../src/theme.js"
-import { barraAbajo } from "../src/bar.js"
+import { barraDeAbajo } from "../src/bar.js"
 
 const COLS = Number(process.argv[2] ?? 110)
 const ROWS = Number(process.argv[3] ?? 34)
@@ -68,19 +68,21 @@ const fake = {
     chars: 1668,
     live: true,
   }),
-} as unknown as Parameters<typeof barraAbajo>[0]["brain"]
+} as unknown as Parameters<typeof barraDeAbajo>[0]["brain"]
 tui.setStats(
-  barraAbajo({
+  barraDeAbajo({
     wired: { badge: "on", entries: 12, pend: 0 },
     brain: fake,
     entropy: { value: 0.62, pct: 62, bar: "▓▓▓░░" } as never,
+    cols: 120,
   }),
 )
 tui.beginStream("razonando…")
-setTimeout(() => {
+setTimeout(async () => {
   tui.streamChunk("Estoy pensando en la red. Lo que dices se graba en tu vault ")
   tui.streamChunk("y, si quieres, lo subimos a la **Wired** para que otros nodos lo lean.")
-  tui.endStream()
+  tui.flushTyping()
+  await tui.endStream()
   tui.push("user", "dame un ejemplo")
   tui.push(
     "lain",
