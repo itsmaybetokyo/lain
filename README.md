@@ -25,6 +25,17 @@ mirar. Y ese grafo no queda solo: los nodos se federan en **la Wired** (Protocol
   `notification.mp3` y `typing.mp3` en `~/.lain/` (mandan sobre los de lain) o apuntá
   `soundFile` y `typingFile` en la config a donde quieras.
 
+## Demo
+
+Así se ve una charla cualquiera: el retrato a la izquierda, la respuesta saliendo
+letra por letra (con el tecleo sonando) y abajo los números del turno —tokens,
+razón, tiempo y la entropía de la Wired—.
+
+[![lain en la terminal](assets/demo.png)](assets/demo.mp4)
+
+*(Son 19 segundos. El video está en [`assets/demo.mp4`](assets/demo.mp4): GitHub lo
+reproduce ahí mismo.)*
+
 ## Estado
 
 Hoy es **Windows-first**. Lanzar el agente usa `opencode.exe`, el sonido y la voz usan
