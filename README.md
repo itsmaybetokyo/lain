@@ -31,10 +31,11 @@ Así se ve una charla cualquiera: el retrato a la izquierda, la respuesta salien
 letra por letra (con el tecleo sonando) y abajo los números del turno —tokens,
 razón, tiempo y la entropía de la Wired—.
 
-[![lain en la terminal](assets/demo.png)](assets/demo.mp4)
+<p align="center" width="100%">
+  <video src="https://github.com/user-attachments/assets/ae9f6c77-ff5c-4ee7-b1e6-8b0fd53b213b" width="80%" controls></video>
+</p>
 
-*(Son 19 segundos. El video está en [`assets/demo.mp4`](assets/demo.mp4): GitHub lo
-reproduce ahí mismo.)*
+*(19 segundos, con sonido. El archivo también está en [`assets/demo.mp4`](assets/demo.mp4).)*
 
 ## Estado
 
