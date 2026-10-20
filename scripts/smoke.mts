@@ -125,10 +125,21 @@ try {
   check(visto.cargaVistos().size === 0, "si el archivo está roto, arranca vacío en vez de romper")
 
   // Permisos de opencode: si pregunta y nadie contesta, el turno se cuelga.
-  const { Brain, respondePermiso, explainError } = await import("../src/brain.js")
+  const { Brain, respondePermiso, explainError, esEventoPermiso, normalizaPermiso } = await import(
+    "../src/brain.js"
+  )
   check(respondePermiso("external_directory") === "once", "mirar el vault y la Wired fuera de la carpeta de trabajo se concede de a uno")
   check(respondePermiso("doom_loop") === "reject", "un agente que se repite en bucle se rechaza")
   check(respondePermiso("otra_cosa") === "once", "lo que no conocemos se contesta de a uno")
+
+  // opencode 1.19 pasó de permission.updated a permission.asked: hay que oír los dos.
+  check(esEventoPermiso("permission.asked"), "se atiende el nombre nuevo del evento (permission.asked)")
+  check(esEventoPermiso("permission.updated"), "y también el viejo (permission.updated)")
+  check(!esEventoPermiso("message.part.updated"), "un mensaje cualquiera no se confunde con un permiso")
+  const nuevo = normalizaPermiso({ id: "per_2", sessionID: "ses_x", permission: "external_directory", patterns: ["C:\\a\\*", "D:\\b\\*"] })
+  check(nuevo?.tipo === "external_directory" && nuevo?.patron === "C:\\a\\*, D:\\b\\*", "se leen los campos nuevos (permission/patterns)")
+  const viejo = normalizaPermiso({ id: "per_3", sessionID: "ses_y", type: "edit", pattern: "C:\\c\\*" })
+  check(viejo?.tipo === "edit" && viejo?.patron === "C:\\c\\*", "y también los viejos (type/pattern)")
 
   // El pedido llega con la sesión del subagente: hay que contestarlo ahí.
   const pedidos: any[] = []
@@ -139,11 +150,69 @@ try {
       pedidos.push(args)
     },
   }
-  await cerebro.contestaPermiso({ id: "per_1", sessionID: "ses_del_subagente", type: "external_directory", pattern: "C:\\x\\.lain\\*" })
+  await cerebro.contestaPermiso({
+    id: "per_1",
+    sessionID: "ses_del_subagente",
+    permission: "external_directory",
+    patterns: ["C:\\x\\.lain\\*"],
+  })
   check(pedidos.length === 1 && pedidos[0].path.id === "ses_del_subagente", "el permiso se contesta en la sesión que lo pidió, no en la principal")
   check(pedidos[0]?.body?.response === "once" && contes.length === 1, "y se concede de a uno, avisando cuál")
-  await cerebro.contestaPermiso({ id: "per_1", sessionID: "ses_del_subagente", type: "external_directory" })
+  check(contes[0]?.patron === "C:\\x\\.lain\\*", "el aviso muestra la ruta que opencode pidió")
+  await cerebro.contestaPermiso({ id: "per_1", sessionID: "ses_del_subagente", permission: "external_directory" })
   check(pedidos.length === 1, "el mismo pedido no se contesta dos veces")
+
+  // Si la respuesta falla, el pedido queda para que el sondeo lo reintente.
+  cerebro.client = { postSessionIdPermissionsPermissionId: async () => ({ error: { status: 404 } }) }
+  await cerebro.contestaPermiso({ id: "per_9", sessionID: "ses_z", permission: "edit" })
+  cerebro.client = {
+    postSessionIdPermissionsPermissionId: async (args: any) => {
+      pedidos.push(args)
+    },
+  }
+  await cerebro.contestaPermiso({ id: "per_9", sessionID: "ses_z", permission: "edit" }, true)
+  check(pedidos.filter((p) => p.path.permissionID === "per_9").length === 1, "si no se pudo contestar, el sondeo lo reintenta")
+  check(contes.length === 2, "y el reintento no repite el aviso")
+
+  // La herramienta `question` bloquea el turno hasta que alguien la contesta:
+  // lain la rechaza (no tiene UI de opciones) y muestra qué preguntaron.
+  const { normalizaPregunta } = await import("../src/brain.js")
+  const preg = normalizaPregunta({
+    id: "que_1",
+    sessionID: "ses_q",
+    questions: [
+      { header: "tecla", question: "¿Qué tecla querés?", options: [{ label: "X", description: "" }, { label: "Q", description: "" }] },
+      { header: "otra", question: "¿Y el macro?" },
+    ],
+  })
+  check(
+    preg?.encabezado === "tecla" && preg?.pregunta === "¿Qué tecla querés?" && preg?.opciones.join(",") === "X,Q" && preg?.total === 2,
+    "se lee la pregunta que dejó la herramienta question",
+  )
+  check(normalizaPregunta({ questions: [] }) === null, "sin id no hay pregunta que contestar")
+
+  const urls: string[] = []
+  const fetchReal = globalThis.fetch
+  globalThis.fetch = (async (u: any, init: any) => {
+    urls.push(`${init?.method ?? "GET"} ${String(u)}`)
+    return { ok: true, status: 200, json: async () => ({}) }
+  }) as any
+  try {
+    const avisos: any[] = []
+    const cerebro2: any = new Brain({ onPregunta: (x) => avisos.push(x) })
+    cerebro2.url = "http://127.0.0.1:1"
+    await cerebro2.contestaPregunta({
+      id: "que_2",
+      sessionID: "ses_q",
+      questions: [{ header: "tecla", question: "¿Qué tecla querés?", options: [{ label: "X", description: "" }] }],
+    })
+    check(urls.length === 1 && /^POST .*\/question\/que_2\/reject/.test(urls[0]!), "la pregunta se rechaza para que el turno siga")
+    check(avisos.length === 1 && avisos[0].pregunta === "¿Qué tecla querés?", "y se muestra para contestarla en el chat")
+    await cerebro2.contestaPregunta({ id: "que_2", sessionID: "ses_q", questions: [] })
+    check(urls.length === 1, "la misma pregunta no se rechaza dos veces")
+  } finally {
+    globalThis.fetch = fetchReal
+  }
 
   // La barra de abajo: cada tramo en su columna y la barra llegando al borde.
   const { barraDeAbajo, AYUDA_BARRA } = await import("../src/bar.js")
@@ -283,6 +352,34 @@ try {
 
     check(apenas === 0, "el sonido no arranca solo porque llegue texto del modelo")
     check(escribiendo, "arranca cuando lain empieza a escribir y no se corta mientras escribe")
+  }
+
+  // Botón flotante para volver al final cuando scrolleaste para atrás.
+  {
+    const { Tui } = await import("../src/tui.js")
+    const salida: string[] = []
+    const tui: any = new Tui({ userName: "smoke" })
+    tui.out = { columns: 80, rows: 24, write: (s: string) => (salida.push(s), true) }
+    tui.cols = 80
+    tui.rows = 24
+    tui.msgs = Array.from({ length: 60 }, (_, i) => ({ role: "lain", text: `linea ${i}`, blank: false }))
+    tui.scroll = 12
+    tui.render()
+    const zona = tui.btnFin
+    check(Boolean(zona) && zona.hasta === tui.cols - 1, "el botón «ir al final» queda pegado al borde derecho del chat")
+    check(salida.join("").includes("↓ al final"), "y aparece cuando estás mirando para atrás")
+    tui.onEscape(`<0;${zona.desde + 1};${zona.fila}`, "M")
+    check(tui.scroll === 0, "un clic en el botón te lleva abajo del todo")
+    tui.scroll = 7
+    tui.render()
+    tui.onEscape("<0;5;3", "M")
+    check(tui.scroll === 7, "un clic en otra parte no mueve el chat")
+    tui.scroll = 0
+    salida.length = 0
+    tui.render()
+    check(tui.btnFin === null && !salida.join("").includes("↓ al final"), "sin scroll no hay botón")
+    tui.onEscape("<64;10;10", "M")
+    check(tui.scroll === 3, "la rueda del mouse sigue scrolleando")
   }
 
   const conCausa = (code: string) => Object.assign(new TypeError("fetch failed"), { cause: { code } })

@@ -618,6 +618,13 @@ async function repl(cfg: LainConfig): Promise<void> {
       const que = p.patron ? `${p.tipo} (${p.patron})` : p.tipo
       tui.push("tool", `⟐ permiso ⟐ ${que} · ${p.respuesta === "reject" ? "rechazado" : "concedido"}`, false)
     },
+    onPregunta: (q) => {
+      // La herramienta `question` esperaba una opción que lain no puede elegir:
+      // se rechaza para que el turno siga y el agente lo diga como texto.
+      const extra = q.total > 1 ? ` (+${q.total - 1} más)` : ""
+      const texto = q.pregunta || q.encabezado || "una pregunta"
+      tui.push("tool", `⟐ pregunta ⟐ ${texto}${extra} · la dejé pasar (sin respuesta)`, false)
+    },
     onSubtask: (s) => {
       subagente = s ? { descripcion: s.descripcion, agente: s.agente, desde: s.desde } : null
       tui.setSubagente(subagente)

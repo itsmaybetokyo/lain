@@ -140,6 +140,8 @@ export class Tui {
   private promptLabel = "› "
   private spin = 0
   private scroll = 0
+  /** Zona del botón flotante "ir al final" (fila y columnas, 1-based). */
+  private btnFin: { fila: number; desde: number; hasta: number } | null = null
   private cmdHints: Array<[string, string]> = []
   /** Estado del tabulador: candidatos del comando y por cuál va. */
   private tabRun: { matches: string[]; i: number; out: string; resto: string } | null = null
@@ -370,8 +372,14 @@ export class Tui {
     } else if ((final === "M" || final === "m") && params.startsWith("<")) {
       const parts = params.slice(1).split(";")
       const b = Number(parts[0] ?? "")
+      const x = Number(parts[1] ?? "")
+      const y = Number(parts[2] ?? "")
       if (b === 64) this.scrollBy(3)
       else if (b === 65) this.scrollBy(-3)
+      else if (final === "M" && (b & 3) === 0 && this.btnFin && y === this.btnFin.fila && x >= this.btnFin.desde && x <= this.btnFin.hasta) {
+        // Clic en el botón flotante: de vuelta al final del chat.
+        this.scroll = 0
+      }
     }
     this.refresh()
   }
@@ -877,6 +885,8 @@ export class Tui {
     const margen = Math.max(0, Math.floor((cols - plan.artW) / 2))
     const vacio = " ".repeat(plan.leftW) + (divW ? paint(C.gray, "│") : "")
 
+    this.btnFin = null
+
     for (let i = 0; i < bodyRows; i++) {
       const row = i + 2
       let content: string
@@ -902,6 +912,17 @@ export class Tui {
         content = vacio + padTo(inputLine, rightW)
       }
       buf.push(`\x1b[${row};1H\x1b[2K${content}`)
+    }
+
+    // Botón flotante abajo a la derecha del chat: aparece cuando mirás para
+    // atrás y te devuelve al final (clic, o Fin/Ctrl+E con el teclado).
+    if (this.scroll > 0 && cols >= 16) {
+      const etiqueta = truncateVisible(" ↓ al final ", cols)
+      const ancho = visLen(etiqueta)
+      const desde = Math.max(1, cols - ancho + 1)
+      const fila = artH + chatRows + 1
+      buf.push(`\x1b[${fila};${desde}H${paint(C.inv, etiqueta)}`)
+      this.btnFin = { fila, desde, hasta: desde + ancho - 1 }
     }
     const pie = " " + (typeof this.stats === "function" ? this.stats(cols) : this.stats)
     buf.push(`\x1b[${rows};1H\x1b[2K${truncateVisible(pie, cols)}`)

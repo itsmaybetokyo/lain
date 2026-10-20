@@ -26,6 +26,8 @@ export interface BrainEvents {
   onSubtask?: (s: { id: string; descripcion: string; agente: string; desde: number } | null) => void
   /** opencode pidió un permiso y lain lo contestó (si no, el turno se cuelga). */
   onPermiso?: (p: { tipo: string; patron: string; respuesta: RespuestaPermiso }) => void
+  /** opencode quiere preguntarle algo al usuario y lain no tiene con qué: se rechaza y se muestra. */
+  onPregunta?: (q: Pregunta) => void
 }
 
 /** Lo que acepta opencode al contestar un permiso. */
@@ -47,6 +49,67 @@ const esProgreso = (tipo: unknown): boolean =>
 export function respondePermiso(tipo: string): RespuestaPermiso {
   if (tipo === "doom_loop") return "reject"
   return "once"
+}
+
+/** Un pedido de permiso, ya normalizado. */
+export type Permiso = { id: string; sesion: string; tipo: string; patron: string }
+/**
+ * ¿El evento es un pedido de permiso? opencode 1.19 lo manda como
+ * `permission.asked`; antes se llamaba `permission.updated`. Se aceptan los dos
+ * porque el nombre cambió sin avisar y escuchar el viejo dejaba el turno colgado.
+ */
+export function esEventoPermiso(tipo: unknown): boolean {
+  return tipo === "permission.asked" || tipo === "permission.updated"
+}
+
+/**
+ * Normaliza un pedido de permiso venga como evento o tal cual desde
+ * `GET /permission`: opencode 1.19 usa `permission`/`patterns` y el viejo
+ * `type`/`pattern`.
+ */
+export function normalizaPermiso(p: any): Permiso | null {
+  const id = String(p?.id ?? "")
+  if (!id) return null
+  const patrones = p?.patterns ?? p?.pattern ?? p?.patron
+  return {
+    id,
+    sesion: String(p?.sessionID ?? p?.sesion ?? ""),
+    tipo: String(p?.permission ?? p?.type ?? p?.tipo ?? ""),
+    patron: Array.isArray(patrones) ? patrones.join(", ") : String(patrones ?? ""),
+  }
+}
+
+/** Una pregunta de la herramienta `question`, ya normalizada. */
+export type Pregunta = {
+  id: string
+  sesion: string
+  encabezado: string
+  pregunta: string
+  opciones: string[]
+  total: number
+}
+
+/**
+ * Normaliza un pedido de la herramienta `question`: opencode lo publica como
+ * `question.asked` y lo deja pendiente hasta que alguien contesta o lo rechaza.
+ * Sin esto, el turno quedaba esperando para siempre.
+ */
+export function normalizaPregunta(p: any): Pregunta | null {
+  const id = String(p?.id ?? "")
+  if (!id) return null
+  const lista: any[] = Array.isArray(p?.questions) ? p.questions : []
+  const primera = lista[0] ?? {}
+  const opciones: string[] = Array.isArray(primera.options)
+    ? primera.options.map((o: any) => String(o?.label ?? ""))
+    : []
+  return {
+    id,
+    sesion: String(p?.sessionID ?? ""),
+    encabezado: String(primera.header ?? ""),
+    pregunta: String(primera.question ?? ""),
+    opciones,
+    total: lista.length,
+  }
 }
 
 /** Cuánto silencio aguantamos antes de dar por colgado el turno. */
@@ -145,6 +208,10 @@ export class Brain {
   /** Última señal de vida del turno (delta, parte, herramienta, estado). */
   private lastSignal = 0
   private perro: ReturnType<typeof setInterval> | null = null
+  /** URL del servidor local (para la red de seguridad de permisos). */
+  private url = ""
+  /** Hay un sondeo de permisos en vuelo: no se pisan. */
+  private sondeando = false
   private stopReason: "" | "mano" | "watchdog" = ""
   private errEvent = ""
   /** El turno chocó con la cuota del plan gratuito (límite de uso). */
@@ -213,6 +280,7 @@ export class Brain {
       })
     })
     this.instance = { server: { url, close: () => { try { proc.kill() } catch { /* ignore */ } } } }
+    this.url = url
     this.client = createOpencodeClient({ baseUrl: url })
     const session = await this.client.session.create({
       body: { title: `lain :: ${new Date().toISOString().slice(0, 10)}` },
@@ -234,6 +302,12 @@ export class Brain {
   private subActivo: string | null = null
   /** Permisos ya contestados en este turno: no se contesta dos veces el mismo. */
   private permisosVistos = new Set<string>()
+  /** Permisos que no se pudieron contestar: los reintenta el sondeo. */
+  private permisosSinContestar = new Map<string, Permiso>()
+  /** Preguntas ya vistas: se rechazan una sola vez. */
+  private preguntasVistas = new Set<string>()
+  /** Preguntas que no se pudieron rechazar: las reintenta el sondeo. */
+  private preguntasSinContestar = new Map<string, Pregunta>()
   /** Carpeta donde trabajan lain y sus subagentes (nunca la de instalación). */
   private workDir: string = process.cwd()
 
@@ -265,8 +339,14 @@ export class Brain {
         const p = ev?.properties ?? {}
         // El pedido de permiso puede venir de un subagente (otra sesión) y nadie
         // más lo contesta: se atiende antes del filtro o el turno queda colgado.
-        if (ev?.type === "permission.updated") {
+        if (esEventoPermiso(ev?.type)) {
           void this.contestaPermiso(p)
+          continue
+        }
+        // La herramienta `question` también espera a que alguien conteste: en
+        // una TUI lo hace el usuario; acá no hay quién, así que se rechaza.
+        if (ev?.type === "question.asked") {
+          void this.contestaPregunta(p)
           continue
         }
         // Solo el trabajo real es señal de vida: esperar un permiso no avanza.
@@ -301,10 +381,10 @@ export class Brain {
             break
           }
           case "session.idle":
-            this.running = false
-            this.events.onStatus?.("idle")
-            this.idleResolver?.()
-            this.idleResolver = null
+            this.terminaTurno("idle")
+            break
+          case "session.status":
+            if (String(p?.status?.type ?? "") === "idle") this.terminaTurno("idle")
             break
           case "message.updated": {
             const info = p.info
@@ -343,22 +423,87 @@ export class Brain {
    * quién preguntar, y sin respuesta el turno quedaba colgado hasta que el SDK
    * se rendía con un "fetch failed".
    */
-  private async contestaPermiso(p: any): Promise<void> {
-    const id = String(p?.id ?? "")
-    if (!id || this.permisosVistos.has(id)) return
-    this.permisosVistos.add(id)
-    const tipo = String(p?.type ?? "")
-    const patron = Array.isArray(p?.pattern) ? p.pattern.join(", ") : String(p?.pattern ?? "")
-    const respuesta = respondePermiso(tipo)
-    this.events.onPermiso?.({ tipo, patron, respuesta })
+  private async contestaPermiso(p: any, reintento = false): Promise<void> {
+    const perm = normalizaPermiso(p)
+    if (!perm) return
+    // El aviso sale una sola vez por pedido, aunque después se reintente.
+    if (!reintento && this.permisosVistos.has(perm.id)) return
+    const respuesta = respondePermiso(perm.tipo)
+    if (!reintento) {
+      this.permisosVistos.add(perm.id)
+      this.events.onPermiso?.({ tipo: perm.tipo, patron: perm.patron, respuesta })
+    }
     try {
-      await this.client.postSessionIdPermissionsPermissionId({
-        path: { id: String(p?.sessionID ?? this.sessionId), permissionID: id },
+      const r: any = await this.client.postSessionIdPermissionsPermissionId({
+        path: { id: perm.sesion || this.sessionId, permissionID: perm.id },
         query: { directory: this.workDir },
         body: { response: respuesta },
       })
+      if (r?.error) throw new Error("opencode no aceptó la respuesta")
     } catch {
-      /* si no se pudo contestar, el vigilante corta el turno */
+      // Se guarda para que el sondeo lo reintente (o el vigilante corte).
+      this.permisosSinContestar.set(perm.id, perm)
+      return
+    }
+    this.permisosSinContestar.delete(perm.id)
+    // Contestar un permiso sí es avance: el turno sigue, no lo corte el perro.
+    this.lastSignal = Date.now()
+  }
+
+  /**
+   * La herramienta `question` deja el turno esperando una respuesta que lain no
+   * puede dar (no hay UI de opciones). Se rechaza: el agente decide por su
+   * cuenta o repite la pregunta como texto, y ahí sí la contestás vos.
+   */
+  private async contestaPregunta(p: any, reintento = false): Promise<void> {
+    const q = normalizaPregunta(p)
+    if (!q) return
+    if (!reintento && this.preguntasVistas.has(q.id)) return
+    if (!reintento) {
+      this.preguntasVistas.add(q.id)
+      this.events.onPregunta?.(q)
+    }
+    try {
+      const r = await fetch(
+        `${this.url}/question/${encodeURIComponent(q.id)}/reject?directory=${encodeURIComponent(this.workDir)}`,
+        { method: "POST" },
+      )
+      if (!r.ok && r.status !== 404) throw new Error(`opencode no aceptó el rechazo (${r.status})`)
+    } catch {
+      this.preguntasSinContestar.set(q.id, q)
+      return
+    }
+    this.preguntasSinContestar.delete(q.id)
+    // Rechazarla es avance: el turno sigue, no lo corte el perro.
+    this.lastSignal = Date.now()
+  }
+
+  /**
+   * Red de seguridad: si el evento se pierde (o opencode vuelve a cambiarle el
+   * nombre), el servidor igual tiene el pedido pendiente en `GET /permission` y
+   * `GET /question`. Se consulta mientras hay turno; es local y barato.
+   */
+  private async revisaPendientes(): Promise<void> {
+    if (!this.url || this.sondeando) return
+    this.sondeando = true
+    try {
+      for (const perm of [...this.permisosSinContestar.values()]) await this.contestaPermiso(perm, true)
+      for (const q of [...this.preguntasSinContestar.values()]) await this.contestaPregunta(q, true)
+      const dir = encodeURIComponent(this.workDir)
+      const rp = await fetch(`${this.url}/permission?directory=${dir}`)
+      if (rp.ok) {
+        const pendientes: any = await rp.json()
+        for (const p of Array.isArray(pendientes) ? pendientes : []) await this.contestaPermiso(p)
+      }
+      const rq = await fetch(`${this.url}/question?directory=${dir}`)
+      if (rq.ok) {
+        const preguntas: any = await rq.json()
+        for (const q of Array.isArray(preguntas) ? preguntas : []) await this.contestaPregunta(q)
+      }
+    } catch {
+      /* sin servidor o sin red local: el evento sigue siendo el camino normal */
+    } finally {
+      this.sondeando = false
     }
   }
 
@@ -386,6 +531,41 @@ export class Brain {
       this.subActivo = null
       this.events.onSubtask?.(null)
     }
+  }
+
+  /** El servidor cerró el turno: se suelta a quien esté esperando. */
+  private terminaTurno(estado: string): void {
+    this.running = false
+    this.events.onStatus?.(estado)
+    this.idleResolver?.()
+    this.idleResolver = null
+  }
+
+  /**
+   * La última respuesta del asistente de este turno (texto final, modelo y
+   * error). Se descartan las viejas: si el turno no dijo nada, no queremos
+   * devolver la respuesta anterior.
+   */
+  private async ultimaRespuesta(desde: number): Promise<any | null> {
+    try {
+      const r: any = await this.client.session.messages({
+        path: { id: this.sessionId },
+        query: { directory: this.workDir },
+      })
+      const lista: any[] = r?.data ?? r
+      if (!Array.isArray(lista)) return null
+      for (let i = lista.length - 1; i >= 0; i--) {
+        const info = lista[i]?.info
+        if (info?.role !== "assistant") continue
+        const creado = Number(info?.time?.created ?? 0)
+        // Relojes del mismo equipo: un segundo de margen alcanza.
+        if (creado && creado < desde - 1000) return null
+        return lista[i]
+      }
+    } catch {
+      /* si no se puede, queda lo que llegó por el stream */
+    }
+    return null
   }
 
   /** Inyecta contexto de sistema sin provocar respuesta. Captura el modelo resuelto. */
@@ -433,6 +613,9 @@ export class Brain {
         this.reasoningNotified = false
         this.partTypes.clear()
         this.permisosVistos.clear()
+        this.permisosSinContestar.clear()
+        this.preguntasVistas.clear()
+        this.preguntasSinContestar.clear()
         this.aborted = false
         this.stopReason = ""
         this.errEvent = ""
@@ -450,36 +633,45 @@ export class Brain {
         const body: any = { parts: [{ type: "text", text }] }
         if (this.model) body.model = this.model
         const cut = new Promise<void>((r) => (this.cutResolver = r))
+        // prompt_async contesta enseguida; el turno (texto, herramientas,
+        // errores) llega por /event y termina con session.idle. El prompt
+        // sincrónico esperaba todo el turno y a los 5 minutos moría con
+        // UND_ERR_HEADERS_TIMEOUT (undici corta si no llegan cabeceras).
+        const dormido = new Promise<void>((r) => (this.idleResolver = r))
         this.running = true
         let err = ""
-        const pending = this.client.session
-          .prompt({ path: { id: this.sessionId }, query: { directory: this.workDir }, body })
+        const enviado: any = await this.client.session
+          .promptAsync({ path: { id: this.sessionId }, query: { directory: this.workDir }, body })
           .catch((e: unknown) => {
             err = explainError(e)
             if (looksLikeLimit(e)) this.limitHit = true
             return null
           })
-        const res: any = await Promise.race([pending, cut.then(() => null)])
+        if (enviado === null || enviado?.error) {
+          this.cutResolver = null
+          this.idleResolver = null
+          this.errText = err || explainError(enviado?.error) || "no pude mandar el turno"
+          throw new Error(this.errText)
+        }
+        await Promise.race([dormido, cut])
         this.cutResolver = null
+        this.idleResolver = null
         if (this.aborted) {
           // Cortado (a mano o por el vigilante): nos quedamos con lo que haya.
           this.errText = ""
           return this.textAcc.trim()
         }
-        if (res === null) {
-          this.errText = err || "el modelo no respondió (sin detalle)"
-          throw new Error(this.errText)
-        }
-        // La última parte puede llegar por el stream un pelín después de que el
-        // prompt resuelva: damos un respiro para no cortar la respuesta.
+        // La última parte puede llegar por el stream un pelín después de idle.
         await new Promise((r) => setTimeout(r, 150))
-        const infoErr = (res?.data?.info ?? res?.info)?.error
+        const res: any = await this.ultimaRespuesta(antes)
+        const infoErr = res?.info?.error
         if (infoErr && looksLikeLimit(infoErr)) this.limitHit = true
-        const razon = infoErr ? explainError(infoErr) : ""
-        const vacio = extractText(res).trim() === "" && this.textAcc.trim() === ""
-        if (vacio && (razon || this.errEvent)) {
+        const razon = infoErr ? explainError(infoErr) : this.errEvent
+        const fromParts = extractText(res)
+        const vacio = fromParts.trim() === "" && this.textAcc.trim() === ""
+        if (vacio && razon) {
           // No dijo nada y sabemos por qué: eso es lo que hay que contar.
-          this.errText = razon || this.errEvent
+          this.errText = razon
           throw new Error(this.errText)
         }
         // Tras un aborto el servidor puede devolver un turno viejo vacío al
@@ -490,11 +682,9 @@ export class Brain {
           await this.waitIdle(3000)
           continue
         }
-        const fromParts = extractText(res)
         const acc = this.textAcc
         const out = fromParts.trim().length >= acc.trim().length ? fromParts : acc
-        const info = res?.data?.info ?? res?.info
-        this.captureModel(info)
+        this.captureModel(res?.info)
         // Hubo error pero algo alcanzó a decir: se queda el texto y se avisa.
         this.errText = razon
         return out.trim()
@@ -545,10 +735,19 @@ export class Brain {
    */
   private armaPerro(): void {
     this.desarmaPerro()
-    this.perro = setInterval(() => {
-      if (!this.asking) return
-      if (Date.now() - this.lastSignal > WATCHDOG_MS) void this.colgado()
-    }, 5_000)
+    this.perro = setInterval(() => void this.latido(), 5_000)
+  }
+
+  /**
+   * Un latido del vigilante: primero mira si hay un permiso esperando (y lo
+   * contesta), después decide si el turno se quedó sin señales. En ese orden,
+   * porque un permiso sin contestar era justamente lo que colgaba todo.
+   */
+  private async latido(): Promise<void> {
+    if (!this.asking || this.aborted) return
+    await this.revisaPendientes()
+    if (!this.asking || this.aborted) return
+    if (Date.now() - this.lastSignal > WATCHDOG_MS) await this.colgado()
   }
 
   private desarmaPerro(): void {

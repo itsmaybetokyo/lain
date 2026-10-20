@@ -5,6 +5,7 @@ export const C = {
   dim: esc(2),
   bold: esc(1),
   italic: esc(3),
+  inv: esc(7),
   red: esc(31),
   green: esc(32),
   yellow: esc(33),
