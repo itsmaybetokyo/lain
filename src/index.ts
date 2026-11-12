@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { spawn } from "node:child_process"
 import { loadConfig, saveConfig, ensureDir, workDirOf, WIRED_REPO_DEFAULT } from "./config.js"
@@ -539,14 +539,30 @@ const HELPROWS: Array<[string, string]> = [
 /** Cada cuánto, como mucho, saludamos con el faro local. */
 const BEACON_EVERY_MS = 20 * 60_000
 
-/** Abre el vault en Obsidian (o la carpeta si Obsidian no está instalado). */
+/**
+ * Abre el vault en Obsidian con el graph view adelante.
+ *
+ * Se lanza el ejecutable con la URI en vez de confiar en el protocolo
+ * obsidian://, y se buscan las dos carpetas de instalación: el instalador
+ * nuevo pone Obsidian en Programs\Obsidian (antes solo se miraba
+ * LOCALAPPDATA\Obsidian, así que /vault abría el Explorador).
+ */
 function openVault(cfg: LainConfig, emit: Emit): void {
   ensureVault(cfg)
   ensureDir(join(cfg.vaultPath, ".obsidian"))
+  aseguraGraph(cfg)
   const uri = "obsidian://open?path=" + encodeURIComponent(cfg.vaultPath)
-  if (obsidianLooksInstalled()) {
+  const exe = obsidianExe()
+  if (exe) {
+    try {
+      spawn(exe, [uri], { detached: true, stdio: "ignore" }).unref()
+    } catch {
+      launch(uri)
+    }
+    emit("abriendo el vault en Obsidian (graph view):", "ok", false)
+  } else if (process.platform !== "win32") {
     launch(uri)
-    emit("abriendo el vault en Obsidian:", "ok", false)
+    emit("abriendo el vault en Obsidian (graph view):", "ok", false)
   } else {
     launch(cfg.vaultPath)
     emit("no encontré Obsidian; abro la carpeta del vault:", "system", false)
@@ -555,12 +571,66 @@ function openVault(cfg: LainConfig, emit: Emit): void {
   emit("si no se abre: Obsidian → Open folder as vault → esa carpeta", "system")
 }
 
-function obsidianLooksInstalled(): boolean {
-  if (process.platform === "win32") {
-    return existsSync(join(process.env.LOCALAPPDATA ?? "", "Obsidian", "Obsidian.exe"))
+/** Dónde vive Obsidian.exe, si está instalado (Windows). */
+function obsidianExe(): string | null {
+  if (process.platform !== "win32") return null
+  const bases = [process.env.LOCALAPPDATA, process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"]].filter(
+    (b): b is string => Boolean(b),
+  )
+  for (const base of bases) {
+    for (const sub of [["Programs", "Obsidian"], ["Obsidian"]]) {
+      const exe = join(base, ...sub, "Obsidian.exe")
+      if (existsSync(exe)) return exe
+    }
   }
-  if (process.platform === "darwin") return existsSync("/Applications/Obsidian.app")
-  return true
+  return null
+}
+
+/**
+ * Deja el graph view como hoja activa del vault: Obsidian lee workspace.json al
+ * abrirlo. Si no hay ninguna pestaña de graph, le agrega una al grupo central.
+ */
+function aseguraGraph(cfg: LainConfig): void {
+  const file = join(cfg.vaultPath, ".obsidian", "workspace.json")
+  try {
+    if (!existsSync(file)) return
+    const w = JSON.parse(readFileSync(file, "utf8")) as any
+    const hojas: any[] = []
+    const camina = (n: any): void => {
+      if (!n || typeof n !== "object") return
+      if (n.type === "leaf") hojas.push(n)
+      for (const c of n.children ?? []) camina(c)
+    }
+    camina(w?.main)
+    const graph = hojas.find((h) => h?.state?.type === "graph")
+    if (graph) {
+      if (w.active === graph.id) return
+      w.active = graph.id
+    } else {
+      const primero = (n: any): any => {
+        if (!n || typeof n !== "object") return null
+        if (n.type === "tabs") return n
+        for (const c of n.children ?? []) {
+          const g = primero(c)
+          if (g) return g
+        }
+        return null
+      }
+      const grupo = primero(w?.main)
+      if (!grupo) return
+      const id = Math.random().toString(16).slice(2, 18).padEnd(16, "0")
+      grupo.children = grupo.children ?? []
+      grupo.children.push({
+        id,
+        type: "leaf",
+        state: { type: "graph", state: {}, icon: "lucide-git-fork", title: "Graph view" },
+      })
+      w.active = id
+    }
+    writeFileSync(file, JSON.stringify(w, null, 2), "utf8")
+  } catch {
+    /* si el workspace está raro, no lo tocamos */
+  }
 }
 
 function launch(target: string): void {
