@@ -419,6 +419,29 @@ try {
     check(anchoDe(pila) <= w, `la pila entera respeta el ancho del retrato (${mode})`)
   }
 
+  // El planeta que reemplaza al retrato cuando pasa algo en la Wired: mismo
+  // tamaño que el arte (para que el panel no se mueva), redondo y girando.
+  const { globeRows, ASPECTO_CELDA } = await import("../src/globe.js")
+  for (const mode of ["smooth", "half", "full"] as const) {
+    const filas = mascot({ mode }).split("\n")
+    filas.pop()
+    const filas0 = globeRows(filas.length, anchoArte(mode), 0)
+    check(filas0.length === filas.length, `el planeta tiene las mismas filas que el retrato (${mode})`)
+    check(filas0.every((l) => l.length === anchoArte(mode)), `y el mismo ancho, celda por celda (${mode})`)
+    check(filas0.some((l) => /[^ ]/.test(l)), `el planeta no sale vacío (${mode})`)
+    check(!/\S/.test(filas0[0]!) && !/\S/.test(filas0.at(-1)!), `flota: queda una fila en blanco arriba y otra abajo (${mode})`)
+    // Redondo: el ancho de la esfera en celdas y su alto en filas tienen que
+    // respetar la proporción de la celda (alto ≈ 2.2 × ancho).
+    const alto = filas0.filter((l) => /\S/.test(l)).length
+    const anchoEsfera = filas0.reduce((m, l) => {
+      const ini = l.search(/\S/)
+      return ini < 0 ? m : Math.max(m, l.trimEnd().length - ini)
+    }, 0)
+    check(Math.abs(anchoEsfera - alto * ASPECTO_CELDA) <= 3, `no sale estirada: ${anchoEsfera} de ancho por ${alto} de alto (${mode})`)
+    const filas1 = globeRows(filas.length, anchoArte(mode), 3)
+    check(filas0.join("\n") !== filas1.join("\n"), `y gira: otro ángulo, otro dibujo (${mode})`)
+  }
+
   // Pedir las llaves de la Wired: el pedido se arma solo y va a un repo que el
   // otro alcanza seguro (el de lain, público: de ahí se bajó el programa). El de
   // la Wired puede ser privado, y un repo privado no deja abrir issues a quien no lo ve.

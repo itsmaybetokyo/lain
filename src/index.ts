@@ -6,6 +6,7 @@ import { checkUpdate, applyUpdate, shouldCheckUpdate, recordCheck } from "./upda
 import { installLauncher, uninstallLauncher } from "./install.js"
 import { Brain } from "./brain.js"
 import { mascot, type ArtMode } from "./mascot.js"
+import { globeRows } from "./globe.js"
 import { C, paint, sleep, S } from "./theme.js"
 import { Tui, visLen, wrapText, type Role } from "./tui.js"
 import {
@@ -164,10 +165,55 @@ function workDirContext(dir: string): string {
 }
 
 /** El panel de la izquierda: el retrato y, debajo, la última notificación. */
-function artLines(cfg: LainConfig, glitch = 0): string[] {
+function retrato(cfg: LainConfig, glitch = 0): string[] {
   const art = mascot({ glitch, mode: artMode(cfg) }).split("\n")
   art.pop()
   return art
+}
+
+/** Cuánto dura el planeta girando cuando pasa algo en la Wired. */
+const GLOBO_MS = 6500
+/** Cada cuánto avanza un fotograma del planeta. */
+const GLOBO_FRAME_MS = 110
+
+/** Hasta cuándo el retrato es el planeta (0 = Lain). */
+let globoHasta = 0
+let globoInicio = 0
+let globoTimer: NodeJS.Timeout | null = null
+
+function globoActivo(): boolean {
+  return globoHasta > Date.now()
+}
+
+/** El retrato de Lain, o el planeta girando si acaba de pasar algo. */
+function artLines(cfg: LainConfig, glitch = 0): string[] {
+  const base = retrato(cfg, glitch)
+  if (!globoActivo()) return base
+  const ancho = base.reduce((max, l) => Math.max(max, visLen(l)), 0)
+  const giro = Math.floor((Date.now() - globoInicio) / GLOBO_FRAME_MS) * 0.3
+  return globeRows(base.length, ancho, giro).map((r) => paint(C.brcyan, r))
+}
+
+/**
+ * Pone el planeta a girar un rato en el lugar del retrato y después lo devuelve.
+ * Se llama cuando llega algo nuevo a la Wired, como una notificación más.
+ */
+function muestraGlobo(tui: Tui, cfg: LainConfig): void {
+  if (!tui.tty) return
+  const ahora = Date.now()
+  if (!globoActivo()) globoInicio = ahora
+  globoHasta = ahora + GLOBO_MS
+  if (globoTimer) return
+  globoTimer = setInterval(() => {
+    if (!globoActivo()) {
+      if (globoTimer) clearInterval(globoTimer)
+      globoTimer = null
+      globoInicio = 0
+      refreshLeft(tui, cfg)
+      return
+    }
+    refreshLeft(tui, cfg)
+  }, GLOBO_FRAME_MS)
 }
 
 /** Notificaciones de la Wired apiladas bajo el retrato. No se van solas: se quedan
@@ -193,7 +239,7 @@ function arrancaAnimAvisos(tui: Tui, cfg: LainConfig): void {
  * esta medida, así que nunca lo ensanchan ni corren el chat de al lado.
  */
 function anchoRetrato(cfg: LainConfig): number {
-  return artLines(cfg).reduce((max, l) => Math.max(max, visLen(l)), 0)
+  return retrato(cfg).reduce((max, l) => Math.max(max, visLen(l)), 0)
 }
 
 function leftPanel(cfg: LainConfig, avisoMax = Infinity, ancho = anchoRetrato(cfg)): string[] {
@@ -227,6 +273,8 @@ function avisoWired(
   if (tui && tui.tty) {
     animarAviso()
     arrancaAnimAvisos(tui, cfg)
+    // Y el retrato se convierte en el planeta girando un rato.
+    muestraGlobo(tui, cfg)
     refreshLeft(tui, cfg)
   }
 }
@@ -249,6 +297,9 @@ async function leeWired(cfg: LainConfig): Promise<void> {
 
 /** Fotogramas del retrato (con las notificaciones apiladas abajo) para animarlo. */
 function leftFrames(cfg: LainConfig, avisoMax = Infinity, ancho = anchoRetrato(cfg)): string[][] {
+  // Con el planeta en pantalla no hay glitch que animar: ya gira solo, y
+  // repetir ocho esferas por fotograma sería tirar trabajo.
+  if (globoActivo()) return [[...artLines(cfg), ...avisoLines(avisos, avisoMax, Date.now(), ancho)]]
   const glitches = [0, 5, 1, 9, 2, 0, 6, 3]
   return glitches.map((g) => [...artLines(cfg, g), ...avisoLines(avisos, avisoMax, Date.now(), ancho)])
 }
